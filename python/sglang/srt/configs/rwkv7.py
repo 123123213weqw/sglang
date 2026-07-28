@@ -22,6 +22,13 @@ from sglang.srt.configs.mamba_utils import (
 )
 from sglang.srt.runtime_context import get_parallel
 
+RWKV7_ARCHITECTURES = (
+    "RWKV7ForCausalLM",
+    "Rwkv7ForCausalLM",
+    # Native Transformers checkpoints emitted by rwkv-rs/hf-adapter.
+    "NativeRWKV7ForCausalLM",
+)
+
 
 class Rwkv7Config(PretrainedConfig):
     model_type = "rwkv7"
@@ -130,13 +137,23 @@ class Rwkv7Config(PretrainedConfig):
         return Rwkv7CacheParams(shape=shape, layers=self.linear_layer_ids, dtype=dtype)
 
 
+class Rwkv7NativeConfig(Rwkv7Config):
+    """Config alias for native checkpoints emitted by rwkv-rs/hf-adapter."""
+
+    model_type = "rwkv7_native"
+    # transformers 5.x may synthesize an initializer for config subclasses that
+    # do not define one, which drops the RWKV-specific fields. Reusing the exact
+    # parent initializer keeps both model types on the same SGLang contract.
+    __init__ = Rwkv7Config.__init__
+
+
 register_linear_attn_model(
     LinearAttnModelSpec(
         config_class=Rwkv7Config,
         backend_class_name=(
             "sglang.srt.layers.attention.linear.rwkv7_backend.Rwkv7AttnBackend"
         ),
-        arch_names=["RWKV7ForCausalLM", "Rwkv7ForCausalLM"],
+        arch_names=list(RWKV7_ARCHITECTURES),
         uses_mamba_radix_cache=True,
         support_mamba_cache=True,
         # RWKV-7 first enables the correctness-oriented no-buffer strategy.

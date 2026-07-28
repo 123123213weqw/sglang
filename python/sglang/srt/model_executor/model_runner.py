@@ -26,6 +26,7 @@ import torch
 import torch.distributed as dist
 
 from sglang.srt.configs.load_config import LoadConfig
+from sglang.srt.configs.rwkv7 import RWKV7_ARCHITECTURES
 from sglang.srt.configs.model_config import (
     AttentionArch,
     ModelConfig,
@@ -720,7 +721,7 @@ class ModelRunner:
         if self.ps.pp_size <= 1 or self.ps.pp_rank == 0:
             return None
         archs = getattr(hf_config, "architectures", None) or []
-        if not any(a in ("RWKV7ForCausalLM", "Rwkv7ForCausalLM") for a in archs):
+        if not any(a in RWKV7_ARCHITECTURES for a in archs):
             return None
         return getattr(hf_config, "hidden_size", None)
 

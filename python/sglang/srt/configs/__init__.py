@@ -40,7 +40,7 @@ from sglang.srt.configs.olmo3 import Olmo3Config
 from sglang.srt.configs.qwen3_5 import Qwen3_5Config, Qwen3_5MoeConfig
 from sglang.srt.configs.qwen3_asr import Qwen3ASRConfig
 from sglang.srt.configs.qwen3_next import Qwen3NextConfig
-from sglang.srt.configs.rwkv7 import Rwkv7Config
+from sglang.srt.configs.rwkv7 import Rwkv7Config, Rwkv7NativeConfig
 from sglang.srt.configs.step3_vl import (
     Step3TextConfig,
     Step3VisionEncoderConfig,
@@ -71,6 +71,7 @@ __all__ = [
     "LagunaConfig",
     "Qwen3NextConfig",
     "Rwkv7Config",
+    "Rwkv7NativeConfig",
     "Qwen3_5Config",
     "Qwen3_5MoeConfig",
     "InternS2PreviewConfig",

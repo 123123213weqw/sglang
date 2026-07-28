@@ -42,6 +42,7 @@ from sglang.srt.arg_groups.argparse_actions import (
     LoRAPathAction,
 )
 from sglang.srt.configs.linear_attn_model_registry import get_linear_attn_spec_by_arch
+from sglang.srt.configs.rwkv7 import RWKV7_ARCHITECTURES
 from sglang.srt.connector import ConnectorType
 from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import (
     parse_ib_device_config,
@@ -5358,7 +5359,7 @@ class ServerArgs:
             logger.info(
                 f"Using {attention_backend} as attention backend for {model_arch}."
             )
-        elif model_arch in ["RWKV7ForCausalLM", "Rwkv7ForCausalLM"]:
+        elif model_arch in RWKV7_ARCHITECTURES:
             # The model calls its linear-attention backend directly (the WKV
             # r/w/k/v/kk/a signature does not fit the fixed mixed_qkv custom-op
             # schema), so the backend's per-batch varlen metadata sits INSIDE

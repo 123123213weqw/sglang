@@ -271,7 +271,7 @@ in the GitHub search bar.
 <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><strong>RWKV-7 (Goose)</strong> (0.1B–7.2B)</td>
       <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}><code>fla-hub/rwkv7-1.5B-world</code></td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>Pure-recurrent (attention-free) RWKV-7 language models with O(1) per-sequence state and no KV cache. Supports dynamic batching, chunked prefill, decode CUDA graphs, and state-aware radix prefix caching with the no-buffer Mamba strategy. Use <code>--trust-remote-code</code>; prefill CUDA graphs are disabled for this architecture.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>Pure-recurrent (attention-free) RWKV-7 language models with O(1) per-sequence state and no KV cache. Supports FLA-format and native <code>rwkv-rs/hf-adapter</code> checkpoints, dynamic batching, chunked prefill, decode CUDA graphs, and state-aware radix prefix caching with the no-buffer Mamba strategy. Use <code>--trust-remote-code</code>; prefill CUDA graphs are disabled for this architecture.</td>
     </tr>
 <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><strong>Hunyuan-Large</strong> (389B, MoE)</td>

@@ -760,4 +760,10 @@ class RWKV7ForCausalLM(Rwkv7ForCausalLM):
     pass
 
 
-EntryClass = [Rwkv7ForCausalLM, RWKV7ForCausalLM]
+class NativeRWKV7ForCausalLM(Rwkv7ForCausalLM):
+    """Architecture alias used by native rwkv-rs/hf-adapter checkpoints."""
+
+    pass
+
+
+EntryClass = [Rwkv7ForCausalLM, RWKV7ForCausalLM, NativeRWKV7ForCausalLM]

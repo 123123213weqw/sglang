@@ -11,7 +11,8 @@ from sglang.srt.configs.linear_attn_model_registry import (
     get_linear_attn_config,
     get_linear_attn_spec_by_arch,
 )
-from sglang.srt.configs.rwkv7 import Rwkv7Config
+from sglang.srt.configs.rwkv7 import Rwkv7Config, Rwkv7NativeConfig
+from sglang.srt.utils.hf_transformers.common import _CONFIG_REGISTRY
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -37,6 +38,27 @@ class TestRwkv7Config(CustomTestCase):
             get_linear_attn_spec_by_arch("Rwkv7ForCausalLM"),
             spec,
         )
+        self.assertIs(
+            get_linear_attn_spec_by_arch("NativeRWKV7ForCausalLM"),
+            spec,
+        )
+
+    def test_native_hf_adapter_model_type_uses_optimized_config(self):
+        self.assertIs(_CONFIG_REGISTRY["rwkv7_native"], Rwkv7NativeConfig)
+        self.assertTrue(issubclass(Rwkv7NativeConfig, Rwkv7Config))
+        config = Rwkv7NativeConfig(
+            hidden_size=2048,
+            num_hidden_layers=24,
+            head_dim=64,
+            num_heads=None,
+            norm_eps=1e-6,
+            norm_bias=False,
+        )
+        self.assertEqual(config.model_type, "rwkv7_native")
+        self.assertEqual(config.num_heads, 32)
+        self.assertEqual(config.num_attention_heads, 32)
+        self.assertEqual(config.norm_eps, 1e-6)
+        self.assertFalse(config.norm_bias)
 
     def test_auto_selects_no_buffer_state_cache(self):
         hf_config = SimpleNamespace(architectures=["RWKV7ForCausalLM"])
