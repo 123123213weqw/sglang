@@ -83,6 +83,76 @@ The online W8A8 and W4 paths leave RWKV's small low-rank control projections in
 the activation dtype. Quantizing those projections saves little memory while
 adding poorly shaped quantized matrix multiplications on every layer.
 
+## Legacy CUDA validation (V100 / SM70)
+
+The RWKV-7 path can run without a modern `sgl-kernel` or FlashInfer wheel. On
+Volta, select the PyTorch sampler and disable CUDA graphs; the recurrent WKV
+and fused RWKV elementwise kernels continue to use Triton:
+
+```bash
+python -m sglang.launch_server \
+  --model-path /path/to/rwkv7-hf \
+  --trust-remote-code \
+  --dtype float16 \
+  --attention-backend triton \
+  --sampling-backend pytorch \
+  --grammar-backend none \
+  --chunked-prefill-size 64 \
+  --max-mamba-cache-size 16 \
+  --cuda-graph-backend-decode disabled \
+  --cuda-graph-backend-prefill disabled
+```
+
+The same command accepts `--tp-size 2` or `--pp-size 2` when two devices are
+available. A two-card V100-32GB validation with a native
+`rwkv7-hf-adapter` checkpoint covered the following matrix:
+
+| Configuration | Greedy tokens vs. TP1 | Dynamic batch isolation | 64-token chunked prefill | 128-token state-cache hit |
+| --- | --- | --- | --- | --- |
+| TP1 | reference | exact | exact | exact |
+| TP2 | exact | exact | exact | exact |
+| PP2 | exact | exact | exact | exact |
+
+Run the feature gate against an already-started server. The first run can save
+the TP1 output, and later TP/PP runs can require the same token IDs:
+
+```bash
+python benchmark/rwkv7/verify_serving_features.py \
+  --write-reference /tmp/rwkv7-tp1.json
+
+python benchmark/rwkv7/verify_serving_features.py \
+  --reference-output /tmp/rwkv7-tp1.json
+```
+
+For W8/W4, add `--single-batch-prefix-tokens 0` if shape-dependent quantized
+GEMM rounding changes greedy tokens between single and batched execution. The
+gate still requires deterministic replay, duplicate-request state isolation,
+an exact state-cache hit, and cold/warm continuation equality.
+
+This compatibility path is scoped to RWKV-7. Other SGLang architectures keep
+the normal SM75-or-newer runtime requirement. Online W8A8 requires SM75 and
+online Marlin W4 requires SM80; use a supported BitsAndBytes configuration if
+weight-only quantization is required on older GPUs.
+
+The following loader options were validated end to end on V100 for W8 and W4,
+including dynamic batching, chunked prefill, and recurrent state-cache hits:
+
+```bash
+# W8
+--quantization bitsandbytes --load-format bitsandbytes \
+--model-loader-extra-config \
+  '{"load_in_8bit":true,"load_in_4bit":false}'
+
+# W4 NF4
+--quantization bitsandbytes --load-format bitsandbytes \
+--model-loader-extra-config \
+  '{"load_in_8bit":false,"load_in_4bit":true,"bnb_4bit_compute_dtype":"float16","bnb_4bit_quant_type":"nf4"}'
+```
+
+BitsAndBytes is the legacy functional and memory-saving fallback; it is not the
+optimized quantization speed path. Use online W8A8 or Marlin on their supported
+architectures when throughput is the acceptance criterion.
+
 ## Hugging Face alignment
 
 For native `rwkv-rs/hf-adapter` checkpoints, the alignment harness first runs
