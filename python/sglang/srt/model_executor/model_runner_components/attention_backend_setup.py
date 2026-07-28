@@ -244,7 +244,8 @@ def _build_full_attention_backend_from_str(
     if backend_str not in ATTENTION_BACKENDS:
         raise ValueError(f"Invalid attention backend: {backend_str}")
     model_runner.init_new_workspace = init_new_workspace
-    if rwkv7_config(model_runner.model_config) is not None:
+    model_config = getattr(model_runner, "model_config", None)
+    if model_config is not None and rwkv7_config(model_config) is not None:
         # RWKV-7 is all-linear (zero full-attention layers). Do not construct a
         # real full-attn backend (they probe the empty full KV pool or reject
         # fp32); HybridLinearAttnBackend only needs a no-op stub here.
