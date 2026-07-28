@@ -398,7 +398,15 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         extra_config = load_config.model_loader_extra_config
-        allowed_keys = {"enable_multithread_load", "num_threads"}
+        allowed_keys = {
+            "enable_multithread_load",
+            "num_threads",
+            # Consumed by get_quant_config() for the online Marlin path; the
+            # ordinary checkpoint still uses this default loader.
+            "online_quantization",
+            "group_size",
+            "lm_head_quantized",
+        }
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
         if unexpected_keys:

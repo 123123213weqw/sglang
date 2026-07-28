@@ -824,7 +824,68 @@ python3 -m sglang.launch_server \
     --port 30000 --host 0.0.0.0
 ```
 
-Our team is working on supporting more online quantization methods. SGLang will soon support methods including but not limited to `["awq", "gptq", "marlin", "gptq_marlin", "awq_marlin", "bitsandbytes", "gguf"]`.
+SGLang also supports online BitsAndBytes W4 and W8 quantization from an
+unquantized checkpoint.
+
+### BitsAndBytes online W4/W8
+
+W4 (NF4) is the default BitsAndBytes online mode:
+
+```bash Command
+python3 -m sglang.launch_server \
+    --model-path /path/to/model \
+    --quantization bitsandbytes \
+    --load-format bitsandbytes
+```
+
+Select W8 through the model-loader configuration:
+
+```bash Command
+python3 -m sglang.launch_server \
+    --model-path /path/to/model \
+    --quantization bitsandbytes \
+    --load-format bitsandbytes \
+    --model-loader-extra-config '{"load_in_8bit":true,"load_in_4bit":false}'
+```
+
+Online W8 defaults to `llm_int8_threshold=0.0`, which uses the pure W8 path and
+is compatible with decode CUDA graphs. To enable the BitsAndBytes outlier path,
+set a positive `llm_int8_threshold` explicitly and disable decode CUDA graphs,
+because its data-dependent host check cannot be captured.
+
+### RWKV-7 online W8A8 and Marlin W4
+
+RWKV-7 can quantize an ordinary floating-point Hugging Face checkpoint while it
+is loaded. W8A8 uses per-output-channel INT8 weights and dynamically quantized
+activations:
+
+```bash Command
+python3 -m sglang.launch_server \
+    --model-path /path/to/rwkv7-hf \
+    --trust-remote-code \
+    --dtype bfloat16 \
+    --quantization w8a8_int8
+```
+
+On NVIDIA SM80 or newer, use Marlin for group-wise symmetric W4 weights:
+
+```bash Command
+python3 -m sglang.launch_server \
+    --model-path /path/to/rwkv7-hf \
+    --trust-remote-code \
+    --dtype float16 \
+    --quantization marlin \
+    --model-loader-extra-config \
+      '{"online_quantization":true,"group_size":128}'
+```
+
+Both optimized RWKV-7 paths retain the small low-rank control projections in
+the activation dtype. Those projections account for little model memory but
+are poorly shaped for weight-only kernels, so excluding them improves both
+latency and numerical fidelity. Decode CUDA graphs remain enabled.
+
+SGLang is working on additional online quantization methods, including AWQ,
+GPTQ, and GGUF workflows.
 
 ### torchao online quantization method
 

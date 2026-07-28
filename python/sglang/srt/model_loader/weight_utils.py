@@ -309,6 +309,15 @@ def get_quant_config(
     else:
         model_name_or_path = model_config.model_path
 
+    if model_config.quantization == "marlin" and (
+        load_config.model_loader_extra_config or {}
+    ).get("online_quantization", False):
+        online_config = load_config.model_loader_extra_config
+        return quant_cls(
+            group_size=int(online_config.get("group_size", 128)),
+            lm_head_quantized=bool(online_config.get("lm_head_quantized", False)),
+        )
+
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.

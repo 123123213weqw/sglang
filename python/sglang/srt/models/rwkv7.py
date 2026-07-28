@@ -73,6 +73,10 @@ from sglang.srt.layers.linear import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.quantization.marlin_utils import online_marlin_quantize_weight
+from sglang.srt.layers.quantization.w8a8_int8 import (
+    online_quantize_w8a8_int8_weight,
+)
 from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -274,12 +278,19 @@ class Rwkv7Attention(nn.Module):
             H, H, quant_config, add_prefix("o_proj", prefix), parallel="row"
         )
 
+        low_rank_quant_config = quant_config
+        if quant_config is not None and quant_config.get_name() in (
+            "bitsandbytes",
+            "marlin",
+            "w8a8_int8",
+        ):
+            low_rank_quant_config = None
         self.w_lora = Rwkv7LoRA(
             H,
             config.decay_low_rank_dim,
             "tanh",
             bias=True,
-            quant_config=quant_config,
+            quant_config=low_rank_quant_config,
             prefix=add_prefix("w_lora", prefix),
         )
         self.a_lora = Rwkv7LoRA(
@@ -287,7 +298,7 @@ class Rwkv7Attention(nn.Module):
             config.a_low_rank_dim,
             "identity",
             bias=True,
-            quant_config=quant_config,
+            quant_config=low_rank_quant_config,
             prefix=add_prefix("a_lora", prefix),
         )
         self.g_lora = Rwkv7LoRA(
@@ -295,7 +306,7 @@ class Rwkv7Attention(nn.Module):
             config.gate_low_rank_dim,
             "sigmoid",
             bias=False,
-            quant_config=quant_config,
+            quant_config=low_rank_quant_config,
             prefix=add_prefix("g_lora", prefix),
         )
         if layer_id > 0:
@@ -304,7 +315,7 @@ class Rwkv7Attention(nn.Module):
                 config.v_low_rank_dim,
                 "identity",
                 bias=True,
-                quant_config=quant_config,
+                quant_config=low_rank_quant_config,
                 prefix=add_prefix("v_lora", prefix),
             )
 
@@ -611,7 +622,9 @@ class Rwkv7ForCausalLM(nn.Module):
     # RWKV-7 has no fused/stacked projections (r/k/v/o are separate linears), so
     # the stacked-params mapping is empty. The target modules list the linear
     # sub-modules the bnb loader should quantize on the fly (substring match on
-    # the checkpoint weight name); it mirrors the ReplicatedLinear layers above.
+    # the checkpoint weight name). Keep RWKV's small low-rank control paths in
+    # the activation dtype: quantizing them saves little memory, adds eight
+    # poorly-shaped BNB matmuls per layer, and reduces numerical fidelity.
     bitsandbytes_stacked_params_mapping = {}
     default_bitsandbytes_target_modules = [
         ".r_proj.",
@@ -620,8 +633,6 @@ class Rwkv7ForCausalLM(nn.Module):
         ".o_proj.",
         ".key.",
         ".value.",
-        ".lora.0.",
-        ".lora.2.",
     ]
 
     def __init__(
@@ -699,6 +710,30 @@ class Rwkv7ForCausalLM(nn.Module):
         loaded_params: Set[str] = set()
         pp_skipped = 0
         for name, loaded_weight in weights:
+            marlin_prefix = name.removesuffix(".weight")
+            marlin_weight_name = marlin_prefix + ".B"
+            marlin_scale_name = marlin_prefix + ".s"
+            if (
+                name.endswith(".weight")
+                and loaded_weight.is_floating_point()
+                and marlin_weight_name in params_dict
+                and marlin_scale_name in params_dict
+            ):
+                packed_weight, weight_scale = online_marlin_quantize_weight(
+                    loaded_weight,
+                    group_size=self.quant_config.group_size,
+                )
+                for target_name, tensor in (
+                    (marlin_weight_name, packed_weight),
+                    (marlin_scale_name, weight_scale),
+                ):
+                    target = params_dict[target_name]
+                    weight_loader = getattr(
+                        target, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(target, tensor)
+                    loaded_params.add(target_name)
+                continue
             if name not in params_dict:
                 # pp>1: keys for another stage's slice (layers outside
                 # [start_layer, end_layer), the embeddings off the first rank,
@@ -712,6 +747,27 @@ class Rwkv7ForCausalLM(nn.Module):
                     f"[rwkv7.load_weights] unexpected checkpoint key: {name}"
                 )
             param = params_dict[name]
+            scale_name = name.removesuffix(".weight") + ".weight_scale"
+            if (
+                name.endswith(".weight")
+                and param.dtype == torch.int8
+                and loaded_weight.is_floating_point()
+                and scale_name in params_dict
+            ):
+                # Online W8A8: convert an ordinary HF weight to static
+                # per-output-channel symmetric INT8. The layer dynamically
+                # quantizes activations per token and sgl-kernel executes the
+                # scaled INT8 GEMM. Quantize before the normal weight loaders
+                # so TP column/row sharding is applied to both tensors.
+                loaded_weight, weight_scale = online_quantize_w8a8_int8_weight(
+                    loaded_weight
+                )
+                scale_param = params_dict[scale_name]
+                scale_loader = getattr(
+                    scale_param, "weight_loader", default_weight_loader
+                )
+                scale_loader(scale_param, weight_scale.float())
+                loaded_params.add(scale_name)
             if tp_size > 1 and name.endswith(_head_sharded):
                 shard = param.shape[0]
                 loaded_weight = loaded_weight.narrow(0, tp_rank * shard, shard)
@@ -728,7 +784,11 @@ class Rwkv7ForCausalLM(nn.Module):
             )
 
         # Assert every model parameter was loaded (catches naming mismatches).
-        missing = set(params_dict.keys()) - loaded_params
+        missing = {
+            name
+            for name in set(params_dict.keys()) - loaded_params
+            if not name.endswith(".workspace")
+        }
         if missing:
             raise RuntimeError(
                 f"[rwkv7.load_weights] {len(missing)} params not loaded, e.g. "
