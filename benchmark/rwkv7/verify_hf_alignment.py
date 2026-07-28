@@ -10,7 +10,6 @@ import requests
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 DEFAULT_PROMPTS = [
     "The capital of France is",
     "1 + 2 + 3 + 4 + 5 =",
