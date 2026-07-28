@@ -7,6 +7,7 @@ from typing import List, Optional
 import torch
 
 from sglang.kernels.ops.speculative.topk1 import draft_topk1_postprocess
+from sglang.srt.configs.model_config import is_deepseek_dsa, is_deepseek_v4
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.npu.graph_runner.eagle_draft_extend_npu_graph_runner import (
@@ -17,13 +18,6 @@ from sglang.srt.hardware_backend.npu.graph_runner.eagle_draft_npu_graph_runner i
 )
 from sglang.srt.hardware_backend.npu.graph_runner.npu_graph_runner import NPUGraphRunner
 from sglang.srt.kv_canary.runner.canary_manager import context_tuple
-from sglang.srt.layers.attention.flashinfer_backend import FlashInferAttnBackend
-from sglang.srt.layers.attention.tokenspeed_mla_backend import TokenspeedMLABackend
-from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
-from sglang.srt.layers.attention.trtllm_mha_backend import TRTLLMHAAttnBackend
-from sglang.srt.layers.attention.trtllm_mla_backend import (
-    TRTLLMMLABackend,
-)
 from sglang.srt.layers.moe.utils import (
     speculative_moe_a2a_backend_context,
     speculative_moe_backend_context,
@@ -32,6 +26,7 @@ from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
+from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool
 from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
     Phase,
@@ -155,8 +150,10 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         else:
             ctx = empty_context()
         with (
-            ctx
-        ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
+            ctx,
+            speculative_moe_backend_context(),
+            speculative_moe_a2a_backend_context(),
+        ):
             self.draft_worker = TpModelWorker(
                 server_args=server_args,
                 gpu_id=gpu_id,
@@ -219,6 +216,34 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         ):
             self.draft_worker.init_attention_backends()
             self.init_attention_backend()
+
+    def mirror_deferred_mamba_state_ops(self, batch: ScheduleBatch) -> None:
+        """Mirror target slot lifecycle operations into a recurrent draft pool.
+
+        A STANDALONE draft shares request-to-Mamba slot ids with the target but
+        owns model-specific recurrent tensors.  Therefore a target clear/COW
+        must be replayed on the draft pool with the same ids; copying tensor
+        contents from the target would be invalid when target and draft sizes
+        differ.  This also clears states touched by CUDA-graph warmup before a
+        real request first uses the slot.
+        """
+        if not self.speculative_algorithm.is_standalone():
+            return
+        pool = self.draft_runner.req_to_token_pool
+        if not isinstance(pool, HybridReqToTokenPool):
+            return
+
+        clear = batch.mamba_clear_indices
+        if clear is not None and len(clear) > 0:
+            pool.mamba_pool.clear_slots(pool.translate_mamba_indices(clear))
+
+        cow_src = batch.mamba_cow_src_indices
+        cow_dst = batch.mamba_cow_dst_indices
+        if cow_src is not None and len(cow_src) > 0:
+            pool.mamba_pool.copy_from(
+                pool.translate_mamba_indices(cow_src),
+                pool.translate_mamba_indices(cow_dst),
+            )
 
     def init_cuda_graphs(self):
         with (
@@ -429,37 +454,68 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 self.draft_attn_backend, AiterMultiStepDraftBackend
             )
 
-        graph_supported_backend_types = [
-            TritonAttnBackend,
-            TRTLLMMLABackend,
-            TRTLLMHAAttnBackend,
-            TokenspeedMLABackend,
-            FlashInferAttnBackend,
-        ]
-        if _is_cuda or _is_musa:
-            # DSA is CUDA-only; import lazily so non-CUDA builds don't pull in
-            # deep_gemm and the rest of the sparse-attention stack at import time.
-            from sglang.srt.layers.attention.dsa_backend import (
-                DeepseekSparseAttnBackend,
+        if self.draft_extend_attn_backend is None or (
+            getattr(
+                self.draft_extend_attn_backend,
+                "supports_speculative_draft_extend_cuda_graph",
+                None,
+            )
+            is False
+        ):
+            graph_supported_backend = False
+        else:
+            # These backends are needed only for draft-extend graph capability
+            # detection. Keep them lazy so eager recurrent paths do not require
+            # optional sgl_kernel/FlashInfer/TRT-LLM packages.
+            from sglang.srt.layers.attention.flashinfer_backend import (
+                FlashInferAttnBackend,
+            )
+            from sglang.srt.layers.attention.tokenspeed_mla_backend import (
+                TokenspeedMLABackend,
+            )
+            from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+            from sglang.srt.layers.attention.trtllm_mha_backend import (
+                TRTLLMHAAttnBackend,
+            )
+            from sglang.srt.layers.attention.trtllm_mla_backend import (
+                TRTLLMMLABackend,
             )
 
-            graph_supported_backend_types.append(DeepseekSparseAttnBackend)
-            from sglang.srt.layers.attention.deepseek_v4_backend import (
-                DeepseekV4AttnBackend,
+            graph_supported_backend_types = [
+                TritonAttnBackend,
+                TRTLLMMLABackend,
+                TRTLLMHAAttnBackend,
+                TokenspeedMLABackend,
+                FlashInferAttnBackend,
+            ]
+            hf_config = self.draft_runner.model_config.hf_config
+            if (_is_cuda or _is_musa) and is_deepseek_dsa(hf_config):
+                # DSA is CUDA-only; import lazily so non-CUDA builds don't pull
+                # in deep_gemm for unrelated draft models.
+                from sglang.srt.layers.attention.dsa_backend import (
+                    DeepseekSparseAttnBackend,
+                )
+
+                graph_supported_backend_types.append(DeepseekSparseAttnBackend)
+            if (_is_cuda or _is_musa) and is_deepseek_v4(hf_config):
+                from sglang.srt.layers.attention.deepseek_v4_backend import (
+                    DeepseekV4AttnBackend,
+                )
+
+                graph_supported_backend_types.append(DeepseekV4AttnBackend)
+            if _is_cuda:
+                # FlashMLA is CUDA-only; import lazily so CPU builds don't pull
+                # sgl_kernel.flash_mla at import time.
+                from sglang.srt.layers.attention.flashmla_backend import (
+                    FlashMLABackend,
+                )
+
+                graph_supported_backend_types.append(FlashMLABackend)
+
+            graph_supported_backend = isinstance(
+                self.draft_extend_attn_backend,
+                tuple(graph_supported_backend_types),
             )
-
-            graph_supported_backend_types.append(DeepseekV4AttnBackend)
-        if _is_cuda:
-            # FlashMLA is CUDA-only; import lazily so CPU builds don't pull
-            # sgl_kernel.flash_mla at import time.
-            from sglang.srt.layers.attention.flashmla_backend import FlashMLABackend
-
-            graph_supported_backend_types.append(FlashMLABackend)
-
-        graph_supported_backend = isinstance(
-            self.draft_extend_attn_backend,
-            tuple(graph_supported_backend_types),
-        )
         supports_cuda_draft_extend_graph = (
             _is_cuda or _is_musa
         ) and graph_supported_backend
@@ -1123,6 +1179,11 @@ class EAGLEWorkerV2(BaseSpecWorker):
         self, batch: ScheduleBatch, on_publish=None, grammar_barrier=None
     ):
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
+            # The target consumes deferred Mamba clear/COW metadata during its
+            # prefill.  Mirror those slot operations first so an independent
+            # recurrent STANDALONE draft starts from the corresponding state.
+            self.draft_worker.mirror_deferred_mamba_state_ops(batch)
+
             # Target prefill
             target_capture_mode = (
                 CaptureHiddenMode.NULL

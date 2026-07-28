@@ -56,9 +56,12 @@ def _wkv_recurrent_kernel(
     o_ptr,
     h0_ptr,
     ht_ptr,
+    hi_ptr,
     cu_ptr,
     ci_ptr,
+    ii_ptr,
     n_slots,
+    n_intermediate_slots,
     scale,
     T,
     H: tl.constexpr,
@@ -68,6 +71,8 @@ def _wkv_recurrent_kernel(
     BV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    STORE_INTERMEDIATE_STATE: tl.constexpr,
+    INTERMEDIATE_STEPS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     INDEXED_STATE: tl.constexpr,
 ):
@@ -126,6 +131,7 @@ def _wkv_recurrent_kernel(
     p_v = v_ptr + base_v + o_v
     p_o = o_ptr + base_v + o_v
 
+    i_t = 0
     for _ in range(0, seqlen):
         b_r = tl.load(p_r, mask=mask_k, other=0.0).to(tl.float32) * scale
         b_w = tl.load(p_w, mask=mask_k, other=0.0).to(tl.float32)
@@ -148,6 +154,26 @@ def _wkv_recurrent_kernel(
         b_o = tl.sum(S * b_r[:, None], axis=0)  # [V]
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
+        # TARGET_VERIFY must leave the persistent state untouched until the
+        # acceptance decision is known.  Snapshot every post-token state into
+        # request-major speculative scratch; the generic SGLang commit kernel
+        # later selects the last accepted step and scatters it into the pool.
+        if STORE_INTERMEDIATE_STATE:
+            intermediate_idx = tl.load(ii_ptr + i_n).to(tl.int64)
+            p_hi = (
+                hi_ptr
+                + (((intermediate_idx * INTERMEDIATE_STEPS + i_t) * H + i_h) * K * V)
+                + o_k[:, None] * V
+                + o_v[None, :]
+            )
+            hi_mask = (
+                mask_s
+                & (intermediate_idx >= 0)
+                & (intermediate_idx < n_intermediate_slots)
+                & (i_t < INTERMEDIATE_STEPS)
+            )
+            tl.store(p_hi, S.to(p_hi.dtype.element_ty), mask=hi_mask)
+
         p_r += H * K
         p_w += H * K
         p_k += H * K
@@ -155,6 +181,7 @@ def _wkv_recurrent_kernel(
         p_kk += H * K
         p_v += H * V
         p_o += H * V
+        i_t += 1
 
     if STORE_FINAL_STATE:
         p_ht = ht_ptr + state_nh * K * V + o_k[:, None] * V + o_v[None, :]
@@ -175,6 +202,9 @@ def wkv_recurrent(
     cu_seqlens: torch.Tensor | None = None,
     state_pool: torch.Tensor | None = None,
     cache_indices: torch.Tensor | None = None,
+    update_state_pool: bool = True,
+    intermediate_state: torch.Tensor | None = None,
+    intermediate_state_indices: torch.Tensor | None = None,
     _bv: int | None = None,
     _nw: int | None = None,
     **kwargs,
@@ -193,6 +223,11 @@ def wkv_recurrent(
         cu_seqlens: `[N+1]` token offsets for packed varlen (B must be 1). None
             for the batched decode path (then N == B, T per request).
         reverse: must be False (the decode/recurrent paths never run in reverse).
+        update_state_pool: when ``False``, read indexed initial states without
+            advancing the persistent pool. Used by speculative target verify.
+        intermediate_state: optional ``[S, D, H, K, V]`` scratch receiving each
+            post-token state for acceptance-time rollback/commit.
+        intermediate_state_indices: ``[N]`` rows in ``intermediate_state``.
     """
     if reverse:
         raise NotImplementedError("wkv_recurrent does not support reverse=True")
@@ -236,10 +271,39 @@ def wkv_recurrent(
     # cache_indices[i] directly (state_pool is [size+1, H, K, V] fp32), skipping the
     # temporal[ci] gather + scatter the backend used to do. Same reduction math + bits.
     indexed = state_pool is not None
+    store_intermediate = intermediate_state is not None
+    if store_intermediate:
+        if not indexed:
+            raise ValueError("intermediate_state requires state_pool")
+        if intermediate_state_indices is None:
+            raise ValueError(
+                "intermediate_state_indices are required with intermediate_state"
+            )
+        if intermediate_state.ndim != 5:
+            raise ValueError(
+                "intermediate_state must have shape [S, D, H, K, V], got "
+                f"{tuple(intermediate_state.shape)}"
+            )
+        if tuple(intermediate_state.shape[2:]) != (H, K, V):
+            raise ValueError(
+                "intermediate_state trailing dimensions do not match the WKV state: "
+                f"got {tuple(intermediate_state.shape[2:])}, expected {(H, K, V)}"
+            )
+        if intermediate_state_indices.numel() != N:
+            raise ValueError(
+                "intermediate_state_indices length must match the number of sequences: "
+                f"got {intermediate_state_indices.numel()}, expected {N}"
+            )
+        if cu_seqlens is None and T > intermediate_state.shape[1]:
+            raise ValueError(
+                f"sequence length {T} exceeds speculative scratch width "
+                f"{intermediate_state.shape[1]}"
+            )
     if indexed:
-        h0 = ht_out = state_pool
+        h0 = state_pool
+        ht_out = state_pool
         use_init = True
-        store_final = True
+        store_final = update_state_pool
     else:
         h0 = initial_state
         ht_out = (
@@ -261,9 +325,12 @@ def wkv_recurrent(
         o,
         h0,
         ht_out,
+        intermediate_state if store_intermediate else o,
         cu_seqlens,
         cache_indices,
+        intermediate_state_indices,
         (state_pool.shape[0] if indexed else 0),
+        (intermediate_state.shape[0] if store_intermediate else 0),
         scale,
         T,
         H=H,
@@ -273,6 +340,8 @@ def wkv_recurrent(
         BV=BV,
         USE_INITIAL_STATE=use_init,
         STORE_FINAL_STATE=store_final,
+        STORE_INTERMEDIATE_STATE=store_intermediate,
+        INTERMEDIATE_STEPS=(intermediate_state.shape[1] if store_intermediate else 0),
         IS_VARLEN=cu_seqlens is not None,
         INDEXED_STATE=indexed,
         num_warps=num_warps,

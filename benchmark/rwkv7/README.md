@@ -173,3 +173,43 @@ python benchmark/rwkv7/verify_hf_alignment.py \
 The command exits with a non-zero status if any greedy sequence diverges, the
 maximum generated-token log-probability error exceeds `0.05`, or mean top-10
 overlap falls below `0.8`.
+
+## STANDALONE speculative decoding
+
+RWKV-7 supports a recurrent STANDALONE draft with a topk-1 candidate chain.
+The target and draft own separate recurrent state pools; target verification
+and draft decoding write per-step snapshots to scratch and draft extend commits
+only the accepted state.
+
+```bash
+python -m sglang.launch_server \
+  --model-path /path/to/rwkv7-target \
+  --trust-remote-code \
+  --attention-backend triton \
+  --speculative-algorithm STANDALONE \
+  --speculative-draft-model-path /path/to/rwkv7-draft \
+  --speculative-num-steps 3 \
+  --speculative-eagle-topk 1 \
+  --speculative-num-draft-tokens 4 \
+  --disable-overlap-schedule
+```
+
+The end-to-end gate is
+`test/registered/models/test_rwkv7_standalone_spec.py`. It starts speculative
+and non-speculative servers, requires exact greedy output IDs under dynamic
+batching, checks that drafting is active, and verifies a 128-token recurrent
+state-cache hit against cold generation.
+
+Hardware validation snapshots:
+
+| Device | Model | Batch sizes | Output window | Result |
+| --- | --- | --- | --- | --- |
+| RTX 4080 | RWKV-7 1.5B, FP16 | 1, 2, 4 | 32 tokens, repeated twice | exact vs. non-speculative |
+| RTX 4080 | RWKV-7 1.5B, FP16 | 4 | 64 tokens | exact vs. non-speculative |
+| RTX 4080 | RWKV-7 1.5B, FP16 | 1 | 128-token cache hit + 16-token decode | cold/warm exact |
+| V100 | RWKV-7 0.1B, FP16 | 1, 2 | 32 tokens | exact vs. non-speculative |
+
+For decode CUDA Graphs, target verify and multi-step draft decode are captured;
+RWKV draft extend currently remains eager. On legacy CUDA systems without a
+compatible `sgl_kernel`, speculative tree construction and greedy verification
+fall back to the in-tree Triton kernels.

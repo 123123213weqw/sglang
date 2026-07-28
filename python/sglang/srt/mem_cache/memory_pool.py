@@ -1239,21 +1239,30 @@ class HybridReqToTokenPool(ReqToTokenPool):
         cache_params: BaseLinearStateParams,
         device: str,
         enable_mamba_extra_buffer: bool,
-        draft_model_idx: int,
+        draft_model_idx: Optional[int] = None,
+        mamba_layer_ids: Optional[List[int]] = None,
         speculative_num_draft_tokens: int = None,
         speculative_eagle_topk: Optional[int] = None,
     ) -> HybridReqToTokenPool:
-        """Shallow copy that shares the req_to_token mapping but owns a fresh mamba
-        pool keyed on a single draft layer. Used by multi-layer EAGLE draft workers:
-        each draft head shares the target's request-to-token mapping but needs its
-        own sconv/mamba cache at layer_id=draft_model_idx.
+        """Shallow copy that shares request mappings but owns a fresh Mamba pool.
+
+        Multi-layer EAGLE uses a single ``draft_model_idx``.  A STANDALONE
+        recurrent draft model instead supplies all of its ``mamba_layer_ids`` so
+        its recurrent state is independent from the target while both workers
+        keep the same request/slot lifecycle.
         """
+        if mamba_layer_ids is None:
+            if draft_model_idx is None:
+                raise ValueError(
+                    "clone_with_new_mamba requires draft_model_idx or mamba_layer_ids"
+                )
+            mamba_layer_ids = [draft_model_idx]
         clone = copy.copy(self)
         clone._init_mamba_pool(
             mamba_size=mamba_size,
             mamba_spec_state_size=mamba_spec_state_size,
             cache_params=cache_params,
-            mamba_layer_ids=[draft_model_idx],
+            mamba_layer_ids=mamba_layer_ids,
             device=device,
             enable_mamba_extra_buffer=enable_mamba_extra_buffer,
             speculative_num_draft_tokens=speculative_num_draft_tokens,

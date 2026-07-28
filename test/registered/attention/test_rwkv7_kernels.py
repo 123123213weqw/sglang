@@ -161,6 +161,66 @@ class TestRwkv7Kernels(unittest.TestCase):
         untouched = [index for index in range(len(state_pool)) if index not in (2, 5)]
         torch.testing.assert_close(state_pool[untouched], original_pool[untouched])
 
+    def test_speculative_snapshots_do_not_advance_persistent_state(self):
+        batch, length = 3, 4
+        packed_inputs = self._inputs(1, batch * length)
+        state_pool = (
+            torch.randn(
+                9,
+                self.heads,
+                self.head_dim,
+                self.head_dim,
+                device="cuda",
+                dtype=torch.float32,
+            )
+            * 0.02
+        )
+        original_pool = state_pool.clone()
+        cache_indices = torch.tensor([2, 5, 7], device="cuda", dtype=torch.int32)
+        scratch_indices = torch.arange(batch, device="cuda", dtype=torch.int32)
+        scratch = torch.full(
+            (batch + 1, length, self.heads, self.head_dim, self.head_dim),
+            float("nan"),
+            device="cuda",
+            dtype=torch.float32,
+        )
+        cu_seqlens = torch.arange(
+            0,
+            (batch + 1) * length,
+            length,
+            device="cuda",
+            dtype=torch.int64,
+        )
+
+        actual_o, returned_state = wkv_recurrent(
+            *packed_inputs,
+            state_pool=state_pool,
+            cache_indices=cache_indices,
+            update_state_pool=False,
+            intermediate_state=scratch,
+            intermediate_state_indices=scratch_indices,
+            cu_seqlens=cu_seqlens,
+        )
+        self.assertIsNone(returned_state)
+        torch.testing.assert_close(state_pool, original_pool)
+
+        expected_outputs = []
+        for batch_index, slot in enumerate(cache_indices.tolist()):
+            start = batch_index * length
+            state = original_pool[slot]
+            for step in range(length):
+                expected_o, state = _reference_sequence(
+                    *(x[0, start + step : start + step + 1] for x in packed_inputs),
+                    state,
+                )
+                expected_outputs.append(expected_o)
+                torch.testing.assert_close(
+                    scratch[batch_index, step], state, rtol=2e-5, atol=2e-5
+                )
+
+        expected_o = torch.cat(expected_outputs).unsqueeze(0)
+        torch.testing.assert_close(actual_o, expected_o, rtol=0.02, atol=0.02)
+
     def test_fused_elementwise_ops_are_bit_exact(self):
         tokens, hidden, heads = 5, 128, 2
         x = torch.randn(tokens, hidden, device="cuda", dtype=self.dtype)

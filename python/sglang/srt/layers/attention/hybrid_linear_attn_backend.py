@@ -151,9 +151,20 @@ class MambaAttnBackendBase(AttentionBackend):
                     write_pos_buf[uniq_slots] = new_vals
         elif forward_batch.forward_mode.is_extend(include_draft_extend_v2=True):
             if forward_batch.forward_mode.is_draft_extend_v2():
-                # DRAFT_EXTEND_V2 runs only full-attn layers in the draft model;
-                # skip mamba metadata.
-                query_start_loc = None
+                # MTP draft models run only full-attention layers. A vanilla
+                # recurrent STANDALONE draft (currently RWKV-7) instead rebuilds
+                # the accepted chain here and needs packed-varlen metadata.
+                if getattr(self, "supports_draft_extend_v2", False):
+                    width = forward_batch.spec_info.num_tokens_per_req
+                    query_start_loc = torch.arange(
+                        0,
+                        forward_batch.input_ids.shape[0] + 1,
+                        step=width,
+                        dtype=torch.int32,
+                        device=forward_batch.input_ids.device,
+                    )
+                else:
+                    query_start_loc = None
             elif forward_batch.forward_mode.is_target_verify():
                 query_start_loc = torch.arange(
                     0,
@@ -818,6 +829,10 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
 class HybridLinearAttnBackend(AttentionBackend):
     """Manages a full and linear attention backend"""
 
+    # Draft-extend graph runners currently plan only native full-attention
+    # backends. Recurrent DRAFT_EXTEND_V2 uses eager packed-varlen metadata.
+    supports_speculative_draft_extend_cuda_graph = False
+
     def __init__(
         self,
         full_attn_backend: AttentionBackend,
@@ -867,7 +882,9 @@ class HybridLinearAttnBackend(AttentionBackend):
             attn_backend.on_after_cuda_graph_warmup()
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
-        if forward_batch.forward_mode.is_draft_extend_v2():
+        if forward_batch.forward_mode.is_draft_extend_v2() and not getattr(
+            self.linear_attn_backend, "supports_draft_extend_v2", False
+        ):
             # DRAFT_EXTEND_V2 runs only full-attn layers in the draft model; skip
             # linear/mamba metadata (it requires query_start_loc).
             self.full_attn_backend.init_forward_metadata(forward_batch)

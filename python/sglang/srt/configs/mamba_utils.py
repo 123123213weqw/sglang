@@ -313,6 +313,12 @@ class Rwkv7StateShape:
     hidden_size: int
     num_heads: int
     head_dim: int
+    # The two RWKV token shifts are width-2 causal convolutions in the generic
+    # Mamba cache contract: the persistent state stores the single previous
+    # token.  Exposing these fields also lets SGLang allocate the per-step
+    # speculative rollback windows used by TARGET_VERIFY.
+    conv_kernel: int = 2
+    disable_conv_window_dedup: bool = False
 
     @staticmethod
     def create(
@@ -336,6 +342,8 @@ class Rwkv7StateShape:
             hidden_size=hidden_size,
             num_heads=num_heads,
             head_dim=head_dim,
+            conv_kernel=2,
+            disable_conv_window_dedup=False,
         )
 
 

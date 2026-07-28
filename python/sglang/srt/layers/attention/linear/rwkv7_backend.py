@@ -92,14 +92,29 @@ class Rwkv7AttnBackend(MambaAttnBackendBase):
     match the numpy oracle, which applies no scaling to r before GroupNorm.
     """
 
+    supports_draft_extend_v2 = True
+
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
+        if self.topk > 1:
+            raise ValueError(
+                "RWKV-7 speculative decoding currently supports a linear draft "
+                "chain only; set --speculative-eagle-topk 1."
+            )
         # Base-class field (tuple[int, int]); RWKV-7's token-shift window is
         # (hidden, conv_kernel-1=1). The base reads [-1] as the conv window length.
         self.conv_states_shape = tuple(
             model_runner.req_to_token_pool.mamba_pool.mamba_cache.conv[0].shape[-2:]
         )
         self.scale = 1.0
+        self.verify_intermediate_state_indices = torch.arange(
+            self.req_to_token_pool.size,
+            dtype=torch.int32,
+            device=model_runner.device,
+        )
+        # Set by Rwkv7MultiStepDraftBackend for the topk=1 candidate chain.
+        # Normal target/draft-extend backends leave this as None.
+        self.draft_step_index: Optional[int] = None
 
     # ---- token-shift (width-2 causal shift via the conv state) ----
     def token_shift(
@@ -118,6 +133,75 @@ class Rwkv7AttnBackend(MambaAttnBackendBase):
         conv = cache.conv[conv_idx]  # [size+1, hidden, 1]
         md = self.forward_metadata
         cache_indices = md.mamba_cache_indices
+
+        if (
+            self.is_draft_worker
+            and self.draft_step_index is not None
+            and forward_batch.forward_mode.is_decode_or_idle()
+        ):
+            if self.topk != 1:
+                raise RuntimeError("RWKV-7 draft-state chaining requires topk=1.")
+            batch_size = x.shape[0]
+            scratch_rows = self.verify_intermediate_state_indices[:batch_size]
+            intermediate_conv = cache.intermediate_conv_window[conv_idx]
+            if self.draft_step_index == 0:
+                safe_idx = torch.clamp_min(cache_indices[:batch_size], 0)
+                prev = conv[safe_idx, :, 0]
+            else:
+                prev = intermediate_conv[scratch_rows, self.draft_step_index - 1, :, 0]
+            intermediate_conv[scratch_rows, self.draft_step_index, :, 0] = x.to(
+                intermediate_conv.dtype
+            )
+            return prev.to(x.dtype)
+
+        if forward_batch.forward_mode.is_draft_extend_v2():
+            width = forward_batch.spec_info.num_tokens_per_req
+            if x.shape[0] % width != 0:
+                raise RuntimeError(
+                    "RWKV-7 DRAFT_EXTEND_V2 expects a fixed token width per "
+                    f"request, got {x.shape[0]} tokens and width {width}."
+                )
+            batch_size = x.shape[0] // width
+            safe_idx = torch.clamp_min(cache_indices[:batch_size], 0)
+            x_by_req = x.view(batch_size, width, x.shape[-1])
+            shifted = torch.empty_like(x_by_req)
+            shifted[:, 0] = conv[safe_idx, :, 0].to(x.dtype)
+            if width > 1:
+                shifted[:, 1:] = x_by_req[:, :-1]
+            accepted_step = (
+                forward_batch.spec_info.num_accept_tokens[:batch_size]
+                .to(torch.long)
+                .sub(1)
+                .clamp_(min=0, max=width - 1)
+            )
+            req_rows = torch.arange(batch_size, device=x.device)
+            conv[safe_idx, :, 0] = x_by_req[req_rows, accepted_step].to(conv.dtype)
+            return shifted.view_as(x)
+
+        if forward_batch.forward_mode.is_target_verify():
+            draft_token_num = forward_batch.spec_info.draft_token_num
+            if x.shape[0] % draft_token_num != 0:
+                raise RuntimeError(
+                    "RWKV-7 TARGET_VERIFY expects an equal linear draft width per "
+                    f"request, got {x.shape[0]} tokens and width {draft_token_num}."
+                )
+            batch_size = x.shape[0] // draft_token_num
+            safe_idx = torch.clamp_min(cache_indices[:batch_size], 0)
+            x_by_req = x.view(batch_size, draft_token_num, x.shape[-1])
+            shifted = torch.empty_like(x_by_req)
+            shifted[:, 0] = conv[safe_idx, :, 0].to(x.dtype)
+            if draft_token_num > 1:
+                shifted[:, 1:] = x_by_req[:, :-1]
+
+            # The persistent token-shift state must not move before acceptance.
+            # Save the post-token value for every candidate step into the same
+            # request-major scratch protocol used by Mamba/GDN/KDA.
+            intermediate_conv = cache.intermediate_conv_window[conv_idx]
+            scratch_rows = self.verify_intermediate_state_indices[:batch_size]
+            intermediate_conv[scratch_rows, :draft_token_num, :, 0] = x_by_req.to(
+                intermediate_conv.dtype
+            )
+            return shifted.view_as(x)
 
         if forward_batch.forward_mode.is_decode_or_idle():
             # one token per request: shifted = stored prev; store current.
@@ -169,6 +253,118 @@ class Rwkv7AttnBackend(MambaAttnBackendBase):
         temporal = cache.temporal  # [size+1, H, K, V] fp32
         md = self.forward_metadata
         cache_indices = md.mamba_cache_indices
+
+        if (
+            self.is_draft_worker
+            and self.draft_step_index is not None
+            and forward_batch.forward_mode.is_decode_or_idle()
+        ):
+            if self.topk != 1:
+                raise RuntimeError("RWKV-7 draft-state chaining requires topk=1.")
+            batch_size = r.shape[0]
+            scratch_rows = self.verify_intermediate_state_indices[:batch_size]
+            intermediate_state = cache.intermediate_ssm
+            if intermediate_state is None:
+                raise RuntimeError(
+                    "RWKV-7 STANDALONE draft requires speculative state scratch."
+                )
+            if self.draft_step_index == 0:
+                safe_idx = torch.clamp_min(cache_indices[:batch_size], 0)
+                initial_state = temporal[safe_idx].contiguous().float()
+            else:
+                initial_state = intermediate_state[
+                    scratch_rows, self.draft_step_index - 1
+                ].contiguous()
+            o, final_state = wkv_recurrent(
+                r.unsqueeze(1).contiguous(),
+                w.unsqueeze(1).contiguous(),
+                k.unsqueeze(1).contiguous(),
+                v.unsqueeze(1).contiguous(),
+                kk.unsqueeze(1).contiguous(),
+                a.unsqueeze(1).contiguous(),
+                scale=self.scale,
+                initial_state=initial_state,
+                output_final_state=True,
+            )
+            intermediate_state[scratch_rows, self.draft_step_index] = final_state.to(
+                intermediate_state.dtype
+            )
+            return o.squeeze(1)
+
+        if forward_batch.forward_mode.is_draft_extend_v2():
+            width = forward_batch.spec_info.num_tokens_per_req
+            if r.shape[0] % width != 0:
+                raise RuntimeError(
+                    "RWKV-7 DRAFT_EXTEND_V2 expects a fixed token width per "
+                    f"request, got {r.shape[0]} tokens and width {width}."
+                )
+            batch_size = r.shape[0] // width
+            intermediate_state = cache.intermediate_ssm
+            if intermediate_state is None:
+                raise RuntimeError(
+                    "RWKV-7 STANDALONE draft extend requires speculative state scratch."
+                )
+            scratch_rows = self.verify_intermediate_state_indices[:batch_size]
+            o, _ = wkv_recurrent(
+                r.unsqueeze(0).contiguous(),
+                w.unsqueeze(0).contiguous(),
+                k.unsqueeze(0).contiguous(),
+                v.unsqueeze(0).contiguous(),
+                kk.unsqueeze(0).contiguous(),
+                a.unsqueeze(0).contiguous(),
+                scale=self.scale,
+                cu_seqlens=md.query_start_loc.to(torch.int64),
+                state_pool=temporal,
+                cache_indices=cache_indices[:batch_size],
+                update_state_pool=False,
+                intermediate_state=intermediate_state,
+                intermediate_state_indices=scratch_rows,
+            )
+            accepted_step = (
+                forward_batch.spec_info.num_accept_tokens[:batch_size]
+                .to(torch.long)
+                .sub(1)
+                .clamp_(min=0, max=width - 1)
+            )
+            safe_idx = torch.clamp_min(cache_indices[:batch_size], 0)
+            req_rows = torch.arange(batch_size, device=r.device)
+            temporal[safe_idx] = intermediate_state[req_rows, accepted_step].to(
+                temporal.dtype
+            )
+            return o.squeeze(0)
+
+        if forward_batch.forward_mode.is_target_verify():
+            draft_token_num = forward_batch.spec_info.draft_token_num
+            if r.shape[0] % draft_token_num != 0:
+                raise RuntimeError(
+                    "RWKV-7 TARGET_VERIFY expects an equal linear draft width per "
+                    f"request, got {r.shape[0]} tokens and width {draft_token_num}."
+                )
+            batch_size = r.shape[0] // draft_token_num
+            intermediate_state = cache.intermediate_ssm
+            if intermediate_state is None:
+                raise RuntimeError(
+                    "RWKV-7 TARGET_VERIFY requires a speculative recurrent-state "
+                    "scratch buffer."
+                )
+            o, _ = wkv_recurrent(
+                r.unsqueeze(0).contiguous(),
+                w.unsqueeze(0).contiguous(),
+                k.unsqueeze(0).contiguous(),
+                v.unsqueeze(0).contiguous(),
+                kk.unsqueeze(0).contiguous(),
+                a.unsqueeze(0).contiguous(),
+                scale=self.scale,
+                cu_seqlens=md.query_start_loc.to(torch.int64),
+                state_pool=temporal,
+                cache_indices=cache_indices[:batch_size],
+                update_state_pool=False,
+                intermediate_state=intermediate_state,
+                intermediate_state_indices=self.verify_intermediate_state_indices[
+                    :batch_size
+                ],
+            )
+            return o.squeeze(0)
 
         if forward_batch.forward_mode.is_decode_or_idle():
             # [bs, H, *] -> [bs, 1, H, *]
@@ -231,3 +427,47 @@ class Rwkv7AttnBackend(MambaAttnBackendBase):
         raise NotImplementedError(
             "Rwkv7AttnBackend.recurrence/token_shift are called directly by the model."
         )
+
+
+class Rwkv7MultiStepDraftBackend:
+    """Multi-step wrapper for a topk=1 STANDALONE RWKV draft model.
+
+    Full-attention multi-step wrappers plan temporary KV branches. RWKV has no
+    KV cache; each child backend instead owns one draft-step id and writes its
+    post-step recurrent state into shared speculative scratch.
+    """
+
+    needs_cpu_seq_lens = False
+
+    def __init__(self, model_runner: ModelRunner, speculative_num_steps: int):
+        self.speculative_num_steps = speculative_num_steps
+        self.attn_backends = []
+        for step in range(speculative_num_steps - 1):
+            backend = model_runner._get_attention_backend()
+            backend.linear_attn_backend.draft_step_index = step
+            self.attn_backends.append(backend)
+        self.max_context_len = model_runner.model_config.context_len
+
+    def init_forward_metadata(self, forward_batch: ForwardBatch):
+        for backend in self.attn_backends:
+            backend.init_forward_metadata(forward_batch)
+
+    def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
+        for backend in self.attn_backends:
+            backend.init_cuda_graph_state(max_bs, max_num_tokens)
+
+    def init_forward_metadata_out_graph(
+        self, forward_batch: ForwardBatch, in_capture: bool = False
+    ):
+        for backend in self.attn_backends:
+            backend.init_forward_metadata_out_graph(
+                forward_batch, in_capture=in_capture
+            )
+
+    def init_forward_metadata_in_graph(self, forward_batch: ForwardBatch):
+        for backend in self.attn_backends:
+            backend.init_forward_metadata_in_graph(forward_batch)
+
+    def on_after_cuda_graph_warmup(self):
+        for backend in self.attn_backends:
+            backend.on_after_cuda_graph_warmup()

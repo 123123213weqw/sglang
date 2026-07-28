@@ -1,3 +1,4 @@
+from sglang.srt.configs.hybrid_arch import rwkv7_config
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils.common import (
     cpu_has_amx_support,
@@ -46,6 +47,18 @@ class DraftBackendFactory:
         if self.speculative_num_steps <= 1:
             return None
 
+        if (
+            self.draft_model_runner.spec_algorithm.is_standalone()
+            and rwkv7_config(self.draft_model_runner.model_config) is not None
+        ):
+            from sglang.srt.layers.attention.linear.rwkv7_backend import (
+                Rwkv7MultiStepDraftBackend,
+            )
+
+            return Rwkv7MultiStepDraftBackend(
+                self.draft_model_runner, self.speculative_num_steps
+            )
+
         backend_map = {
             "flashinfer": self._create_flashinfer_decode_backend,
             "triton": self._create_triton_decode_backend,
@@ -72,6 +85,15 @@ class DraftBackendFactory:
         )
 
     def create_draft_extend_backend(self):
+        if (
+            self.draft_model_runner.spec_algorithm.is_standalone()
+            and rwkv7_config(self.draft_model_runner.model_config) is not None
+        ):
+            # Use the normal wrapped backend: unlike MTP draft models, a
+            # STANDALONE RWKV draft executes its recurrent layers during
+            # DRAFT_EXTEND_V2 to rebuild and commit the accepted chain.
+            return self.draft_model_runner._get_attention_backend()
+
         backend_map = {
             "flashinfer": self._create_flashinfer_prefill_backend,
             "triton": self._create_triton_prefill_backend,

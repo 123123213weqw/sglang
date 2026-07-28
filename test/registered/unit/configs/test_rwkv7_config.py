@@ -16,6 +16,7 @@ from sglang.srt.configs.rwkv7 import (
     Rwkv7HFAdapterConfig,
     Rwkv7NativeConfig,
 )
+from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils.hf_transformers.common import _CONFIG_REGISTRY
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -63,6 +64,11 @@ class TestRwkv7Config(CustomTestCase):
         self.assertEqual(config.num_attention_heads, 32)
         self.assertEqual(config.norm_eps, 1e-6)
         self.assertFalse(config.norm_bias)
+
+        with get_parallel().override(attn_tp_size=1):
+            state_shape = config.mamba2_cache_params.shape
+        self.assertEqual(state_shape.conv_kernel, 2)
+        self.assertFalse(state_shape.disable_conv_window_dedup)
 
     def test_legacy_hf_adapter_model_type_uses_optimized_config(self):
         self.assertIs(_CONFIG_REGISTRY["rwkv7_hf_adapter"], Rwkv7HFAdapterConfig)
