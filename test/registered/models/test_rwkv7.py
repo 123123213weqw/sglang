@@ -13,9 +13,12 @@ constant-state recurrent model:
      batched request must reproduce the single-request tokens over the
      leading window (state corruption shows up at the first tokens;
      batch-size-dependent cuBLAS reduction-order drift needs many tokens
-     of autoregressive accumulation to surface).
+     of autoregressive accumulation to surface),
+  4. chunked prefill and recurrent-state prefix-cache restoration preserve
+     greedy output while reporting a real cache hit.
 """
 
+import os
 import unittest
 
 import requests
@@ -31,7 +34,7 @@ from sglang.test.test_utils import (
 
 register_cuda_ci(est_time=180, stage="extra-a", runner_config="1-gpu-small")
 
-MODEL_PATH = "fla-hub/rwkv7-191M-world"
+MODEL_PATH = os.getenv("SGLANG_RWKV7_TEST_MODEL", "fla-hub/rwkv7-191M-world")
 
 PROMPTS = [
     "The capital of France is",
@@ -61,6 +64,9 @@ class TestRwkv7Server(CustomTestCase):
                 # exercised (and extensively validated) at bf16/fp16.
                 "--dtype",
                 "bfloat16",
+                # Exercise recurrent state hand-off between prefill chunks.
+                "--chunked-prefill-size",
+                "64",
                 "--mem-fraction-static",
                 "0.5",
             ],
@@ -101,6 +107,31 @@ class TestRwkv7Server(CustomTestCase):
         )
         resp.raise_for_status()
         return resp.json()
+
+    def _generate_ids(self, input_ids, max_new_tokens=16):
+        resp = requests.post(
+            f"{self.base_url}/generate",
+            json={
+                "input_ids": input_ids,
+                "sampling_params": {
+                    "temperature": 0.0,
+                    "max_new_tokens": max_new_tokens,
+                    "ignore_eos": True,
+                },
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data[0] if isinstance(data, list) else data
+
+    def _flush_cache(self):
+        resp = requests.post(
+            f"{self.base_url}/flush_cache",
+            params={"timeout": 30},
+            timeout=40,
+        )
+        resp.raise_for_status()
 
     def test_generation_basic(self):
         for prompt in PROMPTS[:3]:
@@ -151,6 +182,35 @@ class TestRwkv7Server(CustomTestCase):
                 f"within the first {prefix} tokens for prompt {prompt!r}: "
                 f"single={single[:prefix]} batched={got[:prefix]}",
             )
+
+    def test_chunked_prefill_state_cache_hit(self):
+        # Use explicit token ids so the seeded prefix is guaranteed to be an
+        # exact token prefix of the continuation. At 160 tokens, the full
+        # request crosses two 64-token chunk boundaries.
+        prefix_ids = [100 + i for i in range(96)]
+        full_ids = prefix_ids + [1000 + i for i in range(64)]
+
+        # Establish the cold-cache greedy reference.
+        self._flush_cache()
+        cold = self._generate_ids(full_ids)
+        self.assertEqual(cold["meta_info"]["cached_tokens"], 0)
+
+        # Seed a state checkpoint exactly at the branch point, then continue
+        # from it. MambaRadixCache must restore all token-shift and WKV states.
+        self._flush_cache()
+        self._generate_ids(prefix_ids, max_new_tokens=0)
+        warm = self._generate_ids(full_ids)
+
+        self.assertEqual(
+            warm["meta_info"]["cached_tokens"],
+            len(prefix_ids),
+            "RWKV-7 should restore the recurrent state at the cached prefix",
+        )
+        self.assertEqual(
+            warm["output_ids"],
+            cold["output_ids"],
+            "cached-state continuation must match cold chunked prefill",
+        )
 
 
 if __name__ == "__main__":

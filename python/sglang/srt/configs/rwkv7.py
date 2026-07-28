@@ -11,6 +11,10 @@ exposing `mamba2_cache_params`, `linear_layer_ids` (= all layers), and
 import torch
 from transformers.configuration_utils import PretrainedConfig
 
+from sglang.srt.configs.linear_attn_model_registry import (
+    LinearAttnModelSpec,
+    register_linear_attn_model,
+)
 from sglang.srt.configs.mamba_utils import (
     Mamba2StateDType,
     Rwkv7CacheParams,
@@ -124,3 +128,19 @@ class Rwkv7Config(PretrainedConfig):
         # exact greedy reproduction against the reference implementation.
         dtype = Mamba2StateDType(conv=torch.float32, temporal=torch.float32)
         return Rwkv7CacheParams(shape=shape, layers=self.linear_layer_ids, dtype=dtype)
+
+
+register_linear_attn_model(
+    LinearAttnModelSpec(
+        config_class=Rwkv7Config,
+        backend_class_name=(
+            "sglang.srt.layers.attention.linear.rwkv7_backend.Rwkv7AttnBackend"
+        ),
+        arch_names=["RWKV7ForCausalLM", "Rwkv7ForCausalLM"],
+        uses_mamba_radix_cache=True,
+        support_mamba_cache=True,
+        # RWKV-7 first enables the correctness-oriented no-buffer strategy.
+        # Extra-buffer support needs separate overlap-scheduler validation.
+        support_mamba_cache_extra_buffer=False,
+    )
+)
