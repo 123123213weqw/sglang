@@ -245,7 +245,9 @@ def _get_quantization_config(
         if quant_config is None:
             return None
         # Carry DSV4 expert layout into quant configs so downstream readers don't read env.
-        from sglang.srt.layers.quantization.fp8 import Fp8Config
+        # Resolve through the central registry so legacy CUDA can keep FP8
+        # modules unloaded while still using BitsAndBytes for RWKV-7.
+        from sglang.srt.layers.quantization import Fp8Config
 
         if isinstance(quant_config, Fp8Config):
             quant_config.is_fp4_experts = model_config.is_fp4_experts

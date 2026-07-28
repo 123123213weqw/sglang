@@ -44,11 +44,12 @@ from sglang.srt.configs.model_config import REQUANTIZATION_METHODS, ModelConfig
 from sglang.srt.distributed import (
     get_world_group,
 )
-from sglang.srt.layers.quantization import QuantizationConfig, get_quantization_config
-from sglang.srt.layers.quantization.fp8 import Fp8Config
-from sglang.srt.layers.quantization.modelopt_quant import (
+from sglang.srt.layers.quantization import (
+    Fp8Config,
     ModelOptFp4Config,
     ModelOptFp8Config,
+    QuantizationConfig,
+    get_quantization_config,
 )
 from sglang.srt.model_loader.ci_weight_validation import (
     ci_download_with_validation_and_retry,
@@ -954,8 +955,7 @@ def _prefetch_all_checkpoints(
         _prefetch_all()
         elapsed = time.perf_counter() - start
         logger.info(
-            "Rank %d: prefetching checkpoint files into page cache "
-            "finished in %.2fs",
+            "Rank %d: prefetching checkpoint files into page cache finished in %.2fs",
             local_rank,
             elapsed,
         )
@@ -1478,7 +1478,6 @@ def runai_safetensors_weights_iterator(
     device = device if is_distributed and is_cuda_alike() else "cpu"
 
     with SafetensorsStreamer() as streamer:
-
         streamer.stream_files(
             hf_weights_files,
             device=device,

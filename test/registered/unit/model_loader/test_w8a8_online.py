@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from sglang.srt.layers.quantization.w8a8_int8 import (
+from sglang.srt.layers.quantization.online_utils import (
     online_quantize_w8a8_int8_weight,
 )
 from sglang.test.ci.ci_register import register_cpu_ci

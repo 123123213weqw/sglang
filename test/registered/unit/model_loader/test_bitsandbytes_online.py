@@ -6,6 +6,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import torch
+
 from sglang.srt.layers.quantization.bitsandbytes import BitsAndBytesConfig
 from sglang.srt.model_loader.loader import BitsAndBytesModelLoader
 from sglang.srt.model_loader.weight_utils import get_quant_config
@@ -42,6 +44,14 @@ def _model_config():
 
 
 class TestBitsAndBytesOnlineConfig(unittest.TestCase):
+    def test_non_linear_layer_does_not_import_moe_stack(self):
+        config = BitsAndBytesConfig()
+        moe_module = "sglang.srt.layers.moe.fused_moe_triton.layer"
+        with patch.dict(sys.modules, {moe_module: None}):
+            self.assertIsNone(
+                config.get_quant_method(torch.nn.Embedding(8, 16), prefix="embed")
+            )
+
     def test_w4_remains_the_default(self):
         config = get_quant_config(
             _model_config(),

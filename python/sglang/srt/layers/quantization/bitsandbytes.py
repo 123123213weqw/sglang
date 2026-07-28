@@ -141,13 +141,20 @@ class BitsAndBytesConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional[QuantizeMethodBase]:
-        from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-
         if isinstance(layer, LinearBase):
             if is_layer_skipped_bnb(prefix, self.llm_int8_skip_modules):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
+
+        # Most dense models never construct a FusedMoE. Avoid importing the
+        # complete MoE/FP8 stack for embeddings, norms, and other non-linear
+        # layers; that stack requires modern sgl-kernel wheels.
+        if layer.__class__.__name__ != "FusedMoE":
+            return None
+
+        from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+
+        if isinstance(layer, FusedMoE):
             return BitsAndBytesMoEMethod(self)
         return None
 

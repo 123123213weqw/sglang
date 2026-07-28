@@ -5,14 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
-from sglang.srt.layers.quantization.marlin_utils import (
-    MarlinConfig,
-    MarlinLinearMethod,
-    online_marlin_quantize_weight,
-    scalar_types,
-)
 from sglang.test.ci.ci_register import register_cuda_ci
-from sglang.test.test_marlin_utils import marlin_quantize
 
 register_cuda_ci(est_time=15, stage="base-b", runner_config="1-gpu-small")
 
@@ -23,6 +16,16 @@ def _marlin_is_available():
         and torch.version.hip is None
         and torch.cuda.get_device_capability()[0] >= 8
     )
+
+
+if _marlin_is_available():
+    from sglang.srt.layers.quantization.marlin_utils import (
+        MarlinConfig,
+        MarlinLinearMethod,
+        online_marlin_quantize_weight,
+        scalar_types,
+    )
+    from sglang.test.test_marlin_utils import marlin_quantize
 
 
 @unittest.skipUnless(_marlin_is_available(), "Marlin W4 requires NVIDIA SM80+")

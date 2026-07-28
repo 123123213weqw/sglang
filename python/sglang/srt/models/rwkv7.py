@@ -73,8 +73,7 @@ from sglang.srt.layers.linear import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.quantization.marlin_utils import online_marlin_quantize_weight
-from sglang.srt.layers.quantization.w8a8_int8 import (
+from sglang.srt.layers.quantization.online_utils import (
     online_quantize_w8a8_int8_weight,
 )
 from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
@@ -88,6 +87,16 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix, make_layers
 
 logger = logging.getLogger(__name__)
+
+_online_marlin_quantize_weight = None
+if (
+    torch.cuda.is_available()
+    and torch.version.hip is None
+    and torch.cuda.get_device_capability() >= (8, 0)
+):
+    from sglang.srt.layers.quantization.marlin_utils import (
+        online_marlin_quantize_weight as _online_marlin_quantize_weight,
+    )
 
 
 def _tp_size() -> int:
@@ -719,7 +728,11 @@ class Rwkv7ForCausalLM(nn.Module):
                 and marlin_weight_name in params_dict
                 and marlin_scale_name in params_dict
             ):
-                packed_weight, weight_scale = online_marlin_quantize_weight(
+                if _online_marlin_quantize_weight is None:
+                    raise RuntimeError(
+                        "Online Marlin quantization requires NVIDIA SM80 or newer."
+                    )
+                packed_weight, weight_scale = _online_marlin_quantize_weight(
                     loaded_weight,
                     group_size=self.quant_config.group_size,
                 )
