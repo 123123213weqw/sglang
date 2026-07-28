@@ -185,9 +185,12 @@ class TestRwkv7Server(CustomTestCase):
 
     def test_chunked_prefill_state_cache_hit(self):
         # Use explicit token ids so the seeded prefix is guaranteed to be an
-        # exact token prefix of the continuation. At 160 tokens, the full
-        # request crosses two 64-token chunk boundaries.
-        prefix_ids = [100 + i for i in range(96)]
+        # exact token prefix of the continuation. Keep the checkpoint on a
+        # 64-token prefill boundary: otherwise the cold and warm paths use
+        # different GEMM M dimensions for the same prefix. On larger models,
+        # normal cuBLAS reduction-order drift can then flip a later near-tie
+        # greedy token even though the restored recurrent state is correct.
+        prefix_ids = [100 + i for i in range(128)]
         full_ids = prefix_ids + [1000 + i for i in range(64)]
 
         # Establish the cold-cache greedy reference.
@@ -211,6 +214,24 @@ class TestRwkv7Server(CustomTestCase):
             cold["output_ids"],
             "cached-state continuation must match cold chunked prefill",
         )
+
+    def test_unaligned_state_cache_first_token(self):
+        # Prefix caching is also valid away from a prefill boundary. Compare
+        # the immediate continuation, which catches a missing/stale RWKV state
+        # without conflating cache correctness with shape-dependent GEMM drift
+        # accumulated over later autoregressive steps.
+        prefix_ids = [200 + i for i in range(96)]
+        full_ids = prefix_ids + [1200 + i for i in range(64)]
+
+        self._flush_cache()
+        cold = self._generate_ids(full_ids, max_new_tokens=1)
+
+        self._flush_cache()
+        self._generate_ids(prefix_ids, max_new_tokens=0)
+        warm = self._generate_ids(full_ids, max_new_tokens=1)
+
+        self.assertEqual(warm["meta_info"]["cached_tokens"], len(prefix_ids))
+        self.assertEqual(warm["output_ids"], cold["output_ids"])
 
 
 if __name__ == "__main__":
