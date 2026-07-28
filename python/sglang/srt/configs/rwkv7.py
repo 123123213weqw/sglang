@@ -147,6 +147,13 @@ class Rwkv7NativeConfig(Rwkv7Config):
     __init__ = Rwkv7Config.__init__
 
 
+class Rwkv7HFAdapterConfig(Rwkv7Config):
+    """Config alias for legacy rwkv7-hf-adapter checkpoint directories."""
+
+    model_type = "rwkv7_hf_adapter"
+    __init__ = Rwkv7Config.__init__
+
+
 register_linear_attn_model(
     LinearAttnModelSpec(
         config_class=Rwkv7Config,

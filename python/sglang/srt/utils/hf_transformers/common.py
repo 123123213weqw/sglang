@@ -58,6 +58,7 @@ from sglang.srt.configs import (
     Qwen3_5MoeConfig,
     Qwen3NextConfig,
     Rwkv7Config,
+    Rwkv7HFAdapterConfig,
     Rwkv7NativeConfig,
     Step3p5Config,
     Step3p7Config,
@@ -133,6 +134,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
 # geometry through its optimized Rwkv7Config/model instead of executing remote
 # model code, so both model types intentionally resolve to the same config.
 _CONFIG_REGISTRY["rwkv7_native"] = Rwkv7NativeConfig
+_CONFIG_REGISTRY["rwkv7_hf_adapter"] = Rwkv7HFAdapterConfig
 
 # DeepSeek V3.2 / V4 reuse the V3 config schema. Subclass the upstream
 # transformers class with each model_type so AutoConfig.register passes its
