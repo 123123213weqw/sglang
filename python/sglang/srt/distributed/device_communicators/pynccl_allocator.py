@@ -6,12 +6,27 @@ import traceback
 from contextlib import nullcontext
 
 import torch
-from torch.cuda.memory import (
-    CUDAPluggableAllocator,
-    _cuda_beginAllocateCurrentThreadToPool,
-    _cuda_endAllocateToPool,
-    _cuda_releasePool,
-)
+from torch.cuda.memory import CUDAPluggableAllocator
+
+try:
+    from torch.cuda.memory import (
+        _cuda_beginAllocateCurrentThreadToPool,
+        _cuda_endAllocateToPool,
+        _cuda_releasePool,
+    )
+except ImportError:
+    # PyTorch 2.5-2.7, which are still useful on SM70 GPUs, expose the same
+    # allocator operations under their previous stream-scoped names. Keep the
+    # compatibility aliases local so newer PyTorch builds retain their native
+    # thread-scoped behavior.
+    from torch.cuda.memory import (
+        _cuda_beginAllocateToPool as _cuda_beginAllocateCurrentThreadToPool,
+    )
+    from torch.cuda.memory import (
+        _cuda_endAllocateCurrentStreamToPool as _cuda_endAllocateToPool,
+    )
+
+    _cuda_releasePool = torch._C._cuda_releasePool
 
 from sglang.srt.distributed.parallel_state import GroupCoordinator
 from sglang.srt.environ import envs

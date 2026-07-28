@@ -548,6 +548,42 @@ Relevant parameters:
 
 > **Note:** Standalone speculative decoding currently **does not support** `--enable-dp-attention`.
 
+### RWKV-7 recurrent draft models
+
+RWKV-7 target and draft models can use the same STANDALONE interface. Unlike a
+Transformer draft, each model owns a constant-size recurrent state instead of a
+KV cache. SGLang keeps the target and draft states physically separate, saves
+every draft/verify step in speculative scratch space, and commits only the
+accepted state after verification. Request-slot clear/copy operations are
+mirrored into the draft pool, so recurrent radix-cache continuation remains
+valid without copying model-specific state tensors between target and draft.
+
+The current RWKV-7 implementation supports a linear candidate chain only:
+
+- set `--speculative-eagle-topk 1`;
+- set `--speculative-num-draft-tokens` to `--speculative-num-steps + 1`;
+- target and draft must use the same tokenizer and vocabulary;
+- target verify and multi-step draft decode support CUDA Graph replay;
+- draft extend currently executes eagerly.
+
+```bash Command
+python3 -m sglang.launch_server \
+    --model /path/to/rwkv7-target \
+    --speculative-algorithm STANDALONE \
+    --speculative-draft-model-path /path/to/rwkv7-draft \
+    --speculative-num-steps 3 \
+    --speculative-eagle-topk 1 \
+    --speculative-num-draft-tokens 4 \
+    --attention-backend triton \
+    --disable-overlap-schedule \
+    --cuda-graph-max-bs-decode 8
+```
+
+On legacy CUDA systems without a compatible prebuilt `sgl_kernel`, the
+topk-1 RWKV path uses SGLang's Triton speculative-tree and greedy-verification
+fallback. CUDA Graphs may be disabled independently when the device/runtime
+does not support the selected graph configuration.
+
 ```bash Command
 python3 -m sglang.launch_server \
     --model Qwen/Qwen2.5-7B-Instruct \

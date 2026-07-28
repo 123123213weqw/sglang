@@ -44,11 +44,12 @@ from sglang.srt.configs.model_config import REQUANTIZATION_METHODS, ModelConfig
 from sglang.srt.distributed import (
     get_world_group,
 )
-from sglang.srt.layers.quantization import QuantizationConfig, get_quantization_config
-from sglang.srt.layers.quantization.fp8 import Fp8Config
-from sglang.srt.layers.quantization.modelopt_quant import (
+from sglang.srt.layers.quantization import (
+    Fp8Config,
     ModelOptFp4Config,
     ModelOptFp8Config,
+    QuantizationConfig,
+    get_quantization_config,
 )
 from sglang.srt.model_loader.ci_weight_validation import (
     ci_download_with_validation_and_retry,
@@ -290,12 +291,33 @@ def get_quant_config(
             not load_config.model_loader_extra_config
             or "qlora_adapter_name_or_path" not in load_config.model_loader_extra_config
         ):
-            return quant_cls.from_config({"adapter_name_or_path": ""})
+            # Online quantization has no checkpoint-side quantization_config.
+            # Accept BitsAndBytesConfig fields here so callers can select W8
+            # as well as the default W4 mode.
+            online_config = dict(load_config.model_loader_extra_config or {})
+            if online_config.get("load_in_8bit") and (
+                "llm_int8_threshold" not in online_config
+            ):
+                # The outlier path performs a data-dependent host check and is
+                # not CUDA-graph capturable. Online serving defaults to the
+                # capture-compatible pure W8 path; callers can explicitly set
+                # a positive threshold when eager decode is preferred.
+                online_config["llm_int8_threshold"] = 0.0
+            return quant_cls.from_config(online_config)
         model_name_or_path = load_config.model_loader_extra_config[
             "qlora_adapter_name_or_path"
         ]
     else:
         model_name_or_path = model_config.model_path
+
+    if model_config.quantization == "marlin" and (
+        load_config.model_loader_extra_config or {}
+    ).get("online_quantization", False):
+        online_config = load_config.model_loader_extra_config
+        return quant_cls(
+            group_size=int(online_config.get("group_size", 128)),
+            lm_head_quantized=bool(online_config.get("lm_head_quantized", False)),
+        )
 
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
@@ -933,8 +955,7 @@ def _prefetch_all_checkpoints(
         _prefetch_all()
         elapsed = time.perf_counter() - start
         logger.info(
-            "Rank %d: prefetching checkpoint files into page cache "
-            "finished in %.2fs",
+            "Rank %d: prefetching checkpoint files into page cache finished in %.2fs",
             local_rank,
             elapsed,
         )
@@ -1457,7 +1478,6 @@ def runai_safetensors_weights_iterator(
     device = device if is_distributed and is_cuda_alike() else "cpu"
 
     with SafetensorsStreamer() as streamer:
-
         streamer.stream_files(
             hf_weights_files,
             device=device,

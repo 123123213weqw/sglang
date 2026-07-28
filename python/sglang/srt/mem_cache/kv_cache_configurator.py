@@ -366,6 +366,31 @@ class KVCacheConfigurator:
                     draft_model_idx=self.draft_model_idx,
                     speculative_eagle_topk=self.server_args.speculative_eagle_topk,
                 )
+            elif (
+                self.spec_algorithm.is_standalone()
+                and self.mambaish_config is not None
+                and isinstance(req_to_token_pool, HybridReqToTokenPool)
+            ):
+                # A vanilla recurrent draft shares request/token mappings with
+                # the target, but it must never share recurrent states: drafting
+                # advances speculative candidates independently of target verify.
+                # Keep per-step scratch on the draft pool so RWKV can build a
+                # rollback-able topk=1 chain and commit only accepted tokens.
+                draft_mamba_layer_ids = [
+                    i
+                    for i in self.mambaish_config.mamba2_cache_params.layers
+                    if self.layer_info.start_layer <= i < self.layer_info.end_layer
+                ]
+                req_to_token_pool = req_to_token_pool.clone_with_new_mamba(
+                    mamba_size=self.server_args.max_mamba_cache_size,
+                    mamba_spec_state_size=sizes.max_running_requests,
+                    cache_params=self.mambaish_config.mamba2_cache_params,
+                    device=self.device,
+                    enable_mamba_extra_buffer=self.server_args.enable_mamba_extra_buffer(),
+                    mamba_layer_ids=draft_mamba_layer_ids,
+                    speculative_num_draft_tokens=self.server_args.max_speculative_num_draft_tokens,
+                    speculative_eagle_topk=self.server_args.speculative_eagle_topk,
+                )
 
         # Initialize token_to_kv_pool
         is_dsa_model = is_deepseek_dsa(self.model_config.hf_config)

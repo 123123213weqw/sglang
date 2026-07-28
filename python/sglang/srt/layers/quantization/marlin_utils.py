@@ -23,7 +23,9 @@ from sglang.srt.layers.quantization.base_config import (
 )
 from sglang.srt.layers.quantization.utils import (
     get_scalar_types,
+    gptq_quantize_weights,
     pack_cols,
+    pack_rows,
     unpack_cols,
 )
 from sglang.srt.utils import get_device_capability, is_cuda
@@ -36,12 +38,6 @@ if TYPE_CHECKING:
 from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
     get_tc_piecewise_forward_context,
 )
-
-try:
-    from vllm import _custom_ops as ops
-except ImportError:
-    ops = None
-
 
 _is_cuda = is_cuda()
 
@@ -65,6 +61,44 @@ FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16, 32]
 # changed to False, which allows Marlin to perform global reductions in fp16
 # precision (instead of fp32), and therefore, save on some memory movements.
 USE_FP32_REDUCE_DEFAULT = True
+
+
+def online_marlin_quantize_weight(
+    weight: torch.Tensor, group_size: int = 128
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize an ordinary ``[out, in]`` HF weight to Marlin W4 in memory."""
+    from sglang.kernels.ops.quantization.gptq_marlin_repack import (
+        gptq_marlin_repack,
+    )
+
+    if weight.ndim != 2:
+        raise ValueError(f"Online Marlin requires a 2D weight, got {weight.shape}")
+
+    # Marlin/GPTQ utilities use [K, N], while HF linear weights use [N, K].
+    w = weight.to(device="cuda", dtype=torch.float16).t().contiguous()
+    size_k, size_n = w.shape
+    normalized_group_size = size_k if group_size == -1 else group_size
+    _, qweight, scales, _, _ = gptq_quantize_weights(
+        w,
+        scalar_types.uint4b8,
+        normalized_group_size,
+        act_order=False,
+    )
+    packed_gptq = pack_rows(qweight, 4, size_k, size_n)
+    packed_marlin = gptq_marlin_repack(
+        packed_gptq,
+        perm=torch.empty(0, dtype=torch.int, device=w.device),
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=4,
+    )
+    marlin_scales = marlin_permute_scales(
+        scales.to(torch.float16),
+        size_k=size_k,
+        size_n=size_n,
+        group_size=group_size,
+    )
+    return packed_marlin, marlin_scales
 
 
 @dataclass
@@ -671,6 +705,9 @@ class MarlinConfig(QuantizationConfig):
             f"lm_head_quantized={self.lm_head_quantized})"
         )
 
+    def get_scaled_act_names(self) -> list[str]:
+        return []
+
     @classmethod
     def get_name(cls) -> str:
         return "marlin"
@@ -840,6 +877,12 @@ class MarlinLinearMethod(LinearMethodBase):
         max_workspace_size = (
             output_size_per_partition // self.quant_config.min_n_threads
         ) * self.quant_config.max_parallel
+        max_workspace_size = max(
+            max_workspace_size,
+            torch.cuda.get_device_properties(
+                torch.cuda.current_device()
+            ).multi_processor_count,
+        )
 
         workspace = BasevLLMParameter(
             data=torch.zeros(max_workspace_size, device="cuda", dtype=torch.int),
@@ -872,8 +915,21 @@ class MarlinLinearMethod(LinearMethodBase):
         size_k = x_2d.shape[1]
         size_n = scales.shape[1]
 
-        output_2d = ops.marlin_gemm(
-            x_2d, qweight, scales, workspace, size_m, size_n, size_k
+        output_2d = gptq_marlin_gemm(
+            x_2d,
+            None,
+            qweight,
+            scales,
+            None,
+            None,
+            None,
+            None,
+            workspace,
+            scalar_types.uint4b8,
+            size_m=size_m,
+            size_n=size_n,
+            size_k=size_k,
+            use_fp32_reduce=False,
         )
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1],))

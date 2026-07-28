@@ -57,9 +57,24 @@ _is_xpu = is_xpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _is_cuda:
-    from sgl_kernel import gelu_and_mul as _sgl_gelu_and_mul
-    from sgl_kernel import gelu_tanh_and_mul as _sgl_gelu_tanh_and_mul
-    from sgl_kernel import silu_and_mul as _sgl_silu_and_mul
+    try:
+        from sgl_kernel import gelu_and_mul as _sgl_gelu_and_mul
+        from sgl_kernel import gelu_tanh_and_mul as _sgl_gelu_tanh_and_mul
+        from sgl_kernel import silu_and_mul as _sgl_silu_and_mul
+    except ImportError:
+
+        def _native_act_and_mul(input, out, activation):
+            d = input.shape[-1] // 2
+            out.copy_(activation(input[..., :d]) * input[..., d:])
+
+        def _sgl_silu_and_mul(input, out):
+            _native_act_and_mul(input, out, F.silu)
+
+        def _sgl_gelu_and_mul(input, out):
+            _native_act_and_mul(input, out, F.gelu)
+
+        def _sgl_gelu_tanh_and_mul(input, out):
+            _native_act_and_mul(input, out, lambda x: F.gelu(x, approximate="tanh"))
 
     from sglang.kernels.ops.activation.activation import (
         gelu_and_mul as _jit_gelu_and_mul,
@@ -439,8 +454,7 @@ def get_act_fn(
     if quant_config is not None and act_fn_name in quant_config.get_scaled_act_names():
         if intermediate_size is None:
             raise ValueError(
-                "intermediate_size must be specified for scaled "
-                "activation functions."
+                "intermediate_size must be specified for scaled activation functions."
             )
         return ScaledActivation(
             act_fn, intermediate_size, input_is_parallel, params_dtype
@@ -453,7 +467,6 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
         hasattr(config, "sbert_ce_default_activation_function")
         and config.sbert_ce_default_activation_function is not None
     ):
-
         function_name = config.sbert_ce_default_activation_function
         assert function_name.startswith("torch.nn.modules."), (
             "Loading of activation functions is restricted to "

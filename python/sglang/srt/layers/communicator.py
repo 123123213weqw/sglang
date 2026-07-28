@@ -58,10 +58,28 @@ from sglang.srt.layers.moe import (
     should_use_dp_reduce_scatterv,
     should_use_flashinfer_cutlass_moe_fp4_allgather,
 )
-from sglang.srt.layers.quantization.fp8_utils import (
-    _use_aiter_bpreshuffle_gfx95,
-    materialize_bpreshuffle_fp8_scale_tuple,
+
+_cuda_compute_capability = (
+    torch.cuda.get_device_capability()
+    if torch.cuda.is_available() and torch.version.hip is None
+    else None
 )
+_legacy_cuda = _cuda_compute_capability is not None and _cuda_compute_capability < (
+    7,
+    5,
+)
+
+if _legacy_cuda:
+    _use_aiter_bpreshuffle_gfx95 = False
+
+    def materialize_bpreshuffle_fp8_scale_tuple(value):
+        return value
+
+else:
+    from sglang.srt.layers.quantization.fp8_utils import (
+        _use_aiter_bpreshuffle_gfx95,
+        materialize_bpreshuffle_fp8_scale_tuple,
+    )
 from sglang.srt.layers.utils.cp_utils import (
     is_mla_prefill_cp_enabled,
     mla_use_prefill_cp,

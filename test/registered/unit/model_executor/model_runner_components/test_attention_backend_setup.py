@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from sglang.srt.configs.rwkv7 import Rwkv7Config
 from sglang.srt.layers.attention.hybrid_attn_backend import HybridAttnBackend
 from sglang.srt.model_executor.model_runner_components import (
     attention_backend_setup,
@@ -65,6 +66,32 @@ def test_split_full_attention_applies_model_wrapper_once():
     assert isinstance(split_backend, HybridAttnBackend)
     assert split_backend.decode_backend.name == "decode"
     assert split_backend.prefill_backend.name == "prefill"
+    assert runner.init_new_workspace is True
+
+
+def test_rwkv7_uses_noop_full_attention_backend():
+    runner = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=Rwkv7Config(),
+            context_len=8192,
+        ),
+        req_to_token_pool=object(),
+        token_to_kv_pool=None,
+        init_new_workspace=None,
+    )
+
+    backend = attention_backend_setup._build_full_attention_backend_from_str(
+        model_runner=runner,
+        backend_str="triton",
+        init_new_workspace=True,
+    )
+
+    from sglang.srt.layers.attention.linear.rwkv7_backend import (
+        Rwkv7NoOpFullAttnBackend,
+    )
+
+    assert isinstance(backend, Rwkv7NoOpFullAttnBackend)
+    assert backend.req_to_token_pool is runner.req_to_token_pool
     assert runner.init_new_workspace is True
 
 

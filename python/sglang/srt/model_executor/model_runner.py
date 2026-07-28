@@ -31,6 +31,7 @@ from sglang.srt.configs.model_config import (
     ModelConfig,
     ModelImpl,
 )
+from sglang.srt.configs.rwkv7 import RWKV7_ARCHITECTURES
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.debug_utils.dumper import dumper
 from sglang.srt.distributed import bootstrap
@@ -81,7 +82,6 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.sampler import create_sampler
 from sglang.srt.layers.torchao_utils import apply_torchao_config_to_model
 from sglang.srt.layers.utils.cp_utils import is_mla_prefill_cp_enabled
-from sglang.srt.lora.lora_manager import LoRAManager, init_lora_cuda_graph_moe_buffers
 from sglang.srt.lora.lora_registry import LoRARef
 from sglang.srt.managers.schedule_batch import sanity_check_mm_pad_shift_value
 from sglang.srt.mem_cache import kv_cache_dtype
@@ -210,7 +210,20 @@ from sglang.srt.utils.offloader import (
 )
 from sglang.srt.utils.profile_utils import build_step_span_name
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
-from sglang.srt.utils.weight_checker import WeightChecker
+
+
+class _LazyWeightChecker:
+    def __init__(self, **kwargs):
+        self._kwargs = kwargs
+        self._impl = None
+
+    def handle(self, *args, **kwargs):
+        if self._impl is None:
+            from sglang.srt.utils.weight_checker import WeightChecker
+
+            self._impl = WeightChecker(**self._kwargs)
+        return self._impl.handle(*args, **kwargs)
+
 
 _is_npu = is_npu()
 _is_cpu_amx_available = cpu_has_amx_support()
@@ -358,7 +371,9 @@ class ModelRunner:
             create_offloader_from_server_args(server_args, dp_rank=self.ps.dp_rank)
         )
 
-        self._weight_checker = WeightChecker(get_model=lambda: self.model, ps=self.ps)
+        self._weight_checker = _LazyWeightChecker(
+            get_model=lambda: self.model, ps=self.ps
+        )
 
         if envs.SGLANG_DETECT_SLOW_RANK.get():
             slow_rank_detector.execute()
@@ -710,6 +725,19 @@ class ModelRunner:
             pp_rank=self.ps.pp_rank,
             start_layer=self.layer_info.start_layer,
         )
+
+    def get_pp_proxy_v_first_size(self) -> Optional[int]:
+        # RWKV-7 carries layer-0's value projection (v_first) across the PP stage
+        # boundary in PPProxyTensors; the decode cuda-graph buffer needs a stable
+        # slot for it (same mechanism as get_pp_proxy_topk_size). Full hidden width
+        # (the receiver slices to its tp head range inside forward).
+        hf_config = self.model_config.hf_text_config
+        if self.ps.pp_size <= 1 or self.ps.pp_rank == 0:
+            return None
+        archs = getattr(hf_config, "architectures", None) or []
+        if not any(a in RWKV7_ARCHITECTURES for a in archs):
+            return None
+        return getattr(hf_config, "hidden_size", None)
 
     def decode_num_tokens_per_req(
         self, *, num_draft_tokens: Optional[int] = None
@@ -1109,6 +1137,11 @@ class ModelRunner:
         manager.setup(self.model)
 
     def init_lora_manager(self):
+        from sglang.srt.lora.lora_manager import (
+            LoRAManager,
+            init_lora_cuda_graph_moe_buffers,
+        )
+
         self.lora_manager = LoRAManager(
             base_model=self.model,
             base_hf_config=self.model_config.hf_config,

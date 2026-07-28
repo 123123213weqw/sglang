@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shutil
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import torch
@@ -24,11 +27,24 @@ def _jit_clamp_position_module(dtype: torch.dtype) -> Module:
     )
 
 
+@lru_cache(maxsize=1)
+def _has_nvcc() -> bool:
+    """Return whether the JIT CUDA toolchain is available for this process."""
+    cuda_home = os.environ.get("CUDA_HOME")
+    nvcc = shutil.which("nvcc") or (
+        os.path.join(cuda_home, "bin", "nvcc") if cuda_home else None
+    )
+    return bool(nvcc and os.path.exists(nvcc))
+
+
 def clamp_position_cuda(seq_lens: torch.Tensor) -> torch.Tensor:
     """Compute positions = clamp(seq_lens - 1, min=0) on CUDA.
 
     Supported dtypes: torch.int32, torch.int64.
     """
+    if not _has_nvcc():
+        return torch.clamp(seq_lens - 1, min=0)
+
     dst = torch.empty_like(seq_lens)
     module = _jit_clamp_position_module(seq_lens.dtype)
     module.clamp_position(dst, seq_lens)

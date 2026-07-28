@@ -295,3 +295,58 @@ class KimiLinearCacheParams(BaseLinearStateParams):
     @property
     def is_kda(self) -> bool:
         return True
+
+
+@dataclass(kw_only=True, frozen=True)
+class Rwkv7StateShape:
+    """State shape for RWKV-7 (Goose).
+
+    RWKV-7 has two width-2 (prev-token) token-shifts per layer: one for the
+    time-mix (attn) block, one for the channel-mix (ffn) block. Each is stored as
+    a `(hidden_size, conv_kernel-1=1)` conv state. The recurrent WKV state S is
+    `(num_heads, head_dim, head_dim)` and is kept fp32 by the kernels.
+    """
+
+    conv: List[tuple[int, int]]
+    temporal: tuple[int, int, int]
+
+    hidden_size: int
+    num_heads: int
+    head_dim: int
+    # The two RWKV token shifts are width-2 causal convolutions in the generic
+    # Mamba cache contract: the persistent state stores the single previous
+    # token.  Exposing these fields also lets SGLang allocate the per-step
+    # speculative rollback windows used by TARGET_VERIFY.
+    conv_kernel: int = 2
+    disable_conv_window_dedup: bool = False
+
+    @staticmethod
+    def create(
+        *,
+        tp_world_size: int,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+    ) -> "Rwkv7StateShape":
+        # Token-shift conv state: store the previous token's (post-norm) hidden
+        # vector. conv_kernel=2 => last dim = conv_kernel - 1 = 1. NOT sharded
+        # by TP: token-shift reads/writes the full-width replicated hidden
+        # (attention output is all-reduced before the shift state is written),
+        # unlike the per-head temporal state below.
+        conv_state_shape = (hidden_size, 1)
+        temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
+        return Rwkv7StateShape(
+            # two token-shifts: conv[0] = attn (time-mix), conv[1] = ffn (channel-mix)
+            conv=[conv_state_shape, conv_state_shape],
+            temporal=temporal_state_shape,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            conv_kernel=2,
+            disable_conv_window_dedup=False,
+        )
+
+
+@dataclass(kw_only=True, frozen=True)
+class Rwkv7CacheParams(BaseLinearStateParams):
+    shape: Rwkv7StateShape

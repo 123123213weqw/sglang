@@ -103,9 +103,6 @@ from sglang.srt.entrypoints.openai.serving_tokenize import (
     OpenAIServingDetokenize,
     OpenAIServingTokenize,
 )
-from sglang.srt.entrypoints.openai.serving_transcription import (
-    OpenAIServingTranscription,
-)
 from sglang.srt.entrypoints.request_headers import apply_header_overrides
 from sglang.srt.entrypoints.warmup import execute_warmups
 from sglang.srt.environ import envs
@@ -322,9 +319,16 @@ async def lifespan(fast_api_app: FastAPI):
     fast_api_app.state.openai_serving_detokenize = OpenAIServingDetokenize(
         _global_state.tokenizer_manager
     )
-    fast_api_app.state.openai_serving_transcription = OpenAIServingTranscription(
-        _global_state.tokenizer_manager
-    )
+    if _global_state.tokenizer_manager.model_config.is_audio_model:
+        from sglang.srt.entrypoints.openai.serving_transcription import (
+            OpenAIServingTranscription,
+        )
+
+        fast_api_app.state.openai_serving_transcription = OpenAIServingTranscription(
+            _global_state.tokenizer_manager
+        )
+    else:
+        fast_api_app.state.openai_serving_transcription = None
 
     # Initialize Ollama-compatible serving handler
     fast_api_app.state.ollama_serving = OllamaServing(_global_state.tokenizer_manager)
@@ -1448,9 +1452,12 @@ async def check_weights(
 ):
     if obj is None:
         obj = CheckWeightsReqInput()
-    success, message, ranks, per_engine_checksum = (
-        await _global_state.tokenizer_manager.check_weights(obj, request)
-    )
+    (
+        success,
+        message,
+        ranks,
+        per_engine_checksum,
+    ) = await _global_state.tokenizer_manager.check_weights(obj, request)
     body = {"success": success, "message": message}
     if ranks is not None:
         body["ranks"] = ranks
@@ -1740,6 +1747,15 @@ async def openai_v1_audio_transcriptions(
     ),
 ):
     """OpenAI-compatible audio transcription endpoint."""
+    if raw_request.app.state.openai_serving_transcription is None:
+        return ORJSONResponse(
+            content={
+                "error": {
+                    "message": "The loaded model does not support audio transcription."
+                }
+            },
+            status_code=400,
+        )
     if response_format not in ["json", "text", "verbose_json"]:
         return ORJSONResponse(
             content={
@@ -1774,6 +1790,11 @@ async def openai_v1_realtime_transcription(ws: WebSocket):
     # chat-mode session.update payloads are rejected by the
     # `Literal["transcription"]` constraint on TranscriptionSessionConfig.type
     # (see realtime/protocol.py).
+    if ws.app.state.openai_serving_transcription is None:
+        await ws.close(
+            code=1003, reason="The loaded model does not support transcription"
+        )
+        return
     await ws.app.state.openai_serving_transcription.handle_websocket(ws)
 
 
@@ -2278,8 +2299,7 @@ def _wait_and_warmup(
     skip_elastic_joiner_warmup = server_args.is_ep_scale_joiner
     if skip_elastic_joiner_warmup:
         logger.debug(
-            "[Elastic EP] Skipping server warmup for elastic joiner "
-            "(ep_join_mode=%s)",
+            "[Elastic EP] Skipping server warmup for elastic joiner (ep_join_mode=%s)",
             server_args.ep_join_mode,
         )
 

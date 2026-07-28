@@ -28,14 +28,22 @@ from sglang.srt.utils.common import (
 )
 
 if is_cuda():
-    from flashinfer.sampling import (
-        min_p_sampling_from_probs,
-        top_k_top_p_sampling_from_probs,
-    )
-    from sgl_kernel import (
-        top_k_renorm_prob,
-        top_p_renorm_prob,
-    )
+    try:
+        from flashinfer.sampling import (
+            min_p_sampling_from_probs,
+            top_k_top_p_sampling_from_probs,
+        )
+        from sgl_kernel import (
+            top_k_renorm_prob,
+            top_p_renorm_prob,
+        )
+    except ImportError:
+        # The PyTorch sampler remains fully functional on legacy CUDA builds
+        # where flashinfer/sgl-kernel wheels are unavailable.
+        min_p_sampling_from_probs = None
+        top_k_top_p_sampling_from_probs = None
+        top_k_renorm_prob = None
+        top_p_renorm_prob = None
 
 if is_musa():
     from sgl_kernel import (
@@ -262,6 +270,11 @@ class Sampler(nn.Module):
         else:
             backend = get_server_args().sampling_backend
             if backend == "flashinfer":
+                if top_k_top_p_sampling_from_probs is None:
+                    raise RuntimeError(
+                        "The flashinfer sampling backend is unavailable; use "
+                        "--sampling-backend pytorch on this GPU."
+                    )
                 assert (
                     sampling_info.sampling_seed is None
                 ), "Sampling seed is not supported for flashinfer backend"

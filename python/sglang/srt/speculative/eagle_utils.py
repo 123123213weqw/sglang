@@ -46,10 +46,22 @@ _is_cpu = is_cpu()
 
 logger = logging.getLogger(__name__)
 
+_has_sgl_kernel_tree_ops = False
 if _is_cuda or _is_hip or _is_musa:
-    from sgl_kernel import (
-        build_tree_kernel_efficient as sgl_build_tree_kernel_efficient,
-    )
+    try:
+        from sgl_kernel import (
+            build_tree_kernel_efficient as sgl_build_tree_kernel_efficient,
+        )
+
+        _has_sgl_kernel_tree_ops = True
+    except ImportError:
+        # Legacy CUDA environments (for example Volta) may intentionally run
+        # without a compatible prebuilt sgl_kernel wheel.  The local Triton
+        # implementation below has the same tree-building contract.
+        logger.info(
+            "sgl_kernel tree ops are unavailable; using the Triton "
+            "speculative-tree fallback."
+        )
 elif _is_cpu:
     from sgl_kernel import (
         build_tree_kernel_efficient_cpu as sgl_build_tree_kernel_efficient_cpu,
@@ -228,7 +240,9 @@ def build_tree_kernel_efficient(
             num_verify_tokens,
             tree_mask_mode,
         )
-    elif _is_xpu:
+    elif _is_xpu or (
+        (_is_cuda or _is_hip or _is_musa) and not _has_sgl_kernel_tree_ops
+    ):
         sgl_build_tree_kernel_triton(
             parent_list,
             top_scores_index,
@@ -376,7 +390,7 @@ def verify_tree_greedy_func(
     target_predict: torch.Tensor,
     topk: int = -1,
 ):
-    if _is_cuda or _is_hip or _is_musa:
+    if (_is_cuda or _is_hip or _is_musa) and _has_sgl_kernel_tree_ops:
         from sgl_kernel import verify_tree_greedy
 
         verify_tree_greedy(
@@ -419,7 +433,7 @@ def verify_tree_greedy_func(
             retrive_next_sibling=retrieve_next_sibling,
             target_predict=target_predict,
         )
-    elif _is_xpu:
+    elif _is_xpu or (_is_cuda or _is_hip or _is_musa):
         verify_tree_greedy_triton(
             predicts=predicts,
             accept_index=accept_index,

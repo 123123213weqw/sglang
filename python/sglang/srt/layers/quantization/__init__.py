@@ -18,41 +18,7 @@ class DummyConfig:
 
 CompressedTensorsConfig = DummyConfig
 
-from sglang.srt.layers.quantization.auto_round import AutoRoundConfig
-from sglang.srt.layers.quantization.awq import AWQConfig, AWQCPUConfig, AWQMarlinConfig
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.quantization.bitsandbytes import BitsAndBytesConfig
-from sglang.srt.layers.quantization.blockwise_int8 import BlockInt8Config
-from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
-    CompressedTensorsConfig,
-)
-from sglang.srt.layers.quantization.fp8 import Fp8Config
-from sglang.srt.layers.quantization.gguf import GGUFConfig
-from sglang.srt.layers.quantization.gptq import (
-    CPUGPTQConfig,
-    GPTQAscendConfig,
-    GPTQConfig,
-    GPTQMarlinConfig,
-)
-from sglang.srt.layers.quantization.humming import HummingConfig
-from sglang.srt.layers.quantization.mlx import MlxQuantizationConfig
-from sglang.srt.layers.quantization.modelopt_quant import (
-    ModelOptFp4Config,
-    ModelOptFp8Config,
-    ModelOptMixedPrecisionConfig,
-)
-from sglang.srt.layers.quantization.modelslim.modelslim import ModelSlimConfig
-from sglang.srt.layers.quantization.moe_wna16 import MoeWNA16Config
-from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
-from sglang.srt.layers.quantization.npu_mxfp4 import Mxfp4W4A8Config
-from sglang.srt.layers.quantization.npu_mxfp4_w4a4 import Mxfp4W4A4Config
-from sglang.srt.layers.quantization.nvfp4_online import NvFp4OnlineConfig
-from sglang.srt.layers.quantization.petit import PetitNvFp4Config
-from sglang.srt.layers.quantization.quark.quark import QuarkConfig
-from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
-from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
-from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
-from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
 from sglang.srt.platforms import current_platform
 from sglang.srt.utils import (
     cpu_has_amx_support,
@@ -63,6 +29,72 @@ from sglang.srt.utils import (
     is_npu,
     mxfp_supported,
 )
+
+_cuda_compute_capability = (
+    torch.cuda.get_device_capability()
+    if is_cuda() and torch.cuda.is_available() and torch.version.hip is None
+    else None
+)
+_legacy_cuda = _cuda_compute_capability is not None and _cuda_compute_capability < (
+    7,
+    5,
+)
+
+# Current sgl-kernel wheels start at SM75. Importing quantizers backed by that
+# package on Pascal/Volta fails before an unquantized or BitsAndBytes model can
+# even be constructed. Keep the legacy registry intentionally small; unsupported
+# methods fail at configuration time instead of breaking every model import.
+AutoRoundConfig = AWQConfig = AWQCPUConfig = AWQMarlinConfig = DummyConfig
+BlockInt8Config = Fp8Config = GGUFConfig = DummyConfig
+CPUGPTQConfig = GPTQAscendConfig = GPTQConfig = GPTQMarlinConfig = DummyConfig
+HummingConfig = MarlinConfig = MlxQuantizationConfig = DummyConfig
+ModelOptFp4Config = ModelOptFp8Config = ModelOptMixedPrecisionConfig = DummyConfig
+ModelSlimConfig = MoeWNA16Config = Mxfp4Config = DummyConfig
+Mxfp4W4A8Config = Mxfp4W4A4Config = NvFp4OnlineConfig = DummyConfig
+PetitNvFp4Config = QuarkConfig = QuarkInt4Fp8Config = DummyConfig
+W4AFp8Config = W8A8Fp8Config = W8A8Int8Config = DummyConfig
+
+from sglang.srt.layers.quantization.bitsandbytes import BitsAndBytesConfig
+
+if not _legacy_cuda:
+    from sglang.srt.layers.quantization.auto_round import AutoRoundConfig
+    from sglang.srt.layers.quantization.awq import (
+        AWQConfig,
+        AWQCPUConfig,
+        AWQMarlinConfig,
+    )
+    from sglang.srt.layers.quantization.blockwise_int8 import BlockInt8Config
+    from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
+        CompressedTensorsConfig,
+    )
+    from sglang.srt.layers.quantization.fp8 import Fp8Config
+    from sglang.srt.layers.quantization.gguf import GGUFConfig
+    from sglang.srt.layers.quantization.gptq import (
+        CPUGPTQConfig,
+        GPTQAscendConfig,
+        GPTQConfig,
+        GPTQMarlinConfig,
+    )
+    from sglang.srt.layers.quantization.humming import HummingConfig
+    from sglang.srt.layers.quantization.marlin_utils import MarlinConfig
+    from sglang.srt.layers.quantization.mlx import MlxQuantizationConfig
+    from sglang.srt.layers.quantization.modelopt_quant import (
+        ModelOptFp4Config,
+        ModelOptFp8Config,
+        ModelOptMixedPrecisionConfig,
+    )
+    from sglang.srt.layers.quantization.modelslim.modelslim import ModelSlimConfig
+    from sglang.srt.layers.quantization.moe_wna16 import MoeWNA16Config
+    from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
+    from sglang.srt.layers.quantization.npu_mxfp4 import Mxfp4W4A8Config
+    from sglang.srt.layers.quantization.npu_mxfp4_w4a4 import Mxfp4W4A4Config
+    from sglang.srt.layers.quantization.nvfp4_online import NvFp4OnlineConfig
+    from sglang.srt.layers.quantization.petit import PetitNvFp4Config
+    from sglang.srt.layers.quantization.quark.quark import QuarkConfig
+    from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
+    from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
+    from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
+    from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
 
 _is_mxfp_supported = mxfp_supported()
 
@@ -87,6 +119,7 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "gguf": GGUFConfig,
     "gptq": GPTQConfig,
     "gptq_marlin": GPTQMarlinConfig,
+    "marlin": MarlinConfig,
     "moe_wna16": MoeWNA16Config,
     "compressed-tensors": CompressedTensorsConfig,
     "w4afp8": W4AFp8Config,
@@ -101,8 +134,15 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "mxfp_w4a8": Mxfp4W4A8Config,
 }
 
+if _legacy_cuda:
+    BASE_QUANTIZATION_METHODS = {
+        name: config
+        for name, config in BASE_QUANTIZATION_METHODS.items()
+        if config is not DummyConfig
+    }
 
-if is_cpu() or is_cuda() or (_is_mxfp_supported and is_hip()):
+
+if is_cpu() or (is_cuda() and not _legacy_cuda) or (_is_mxfp_supported and is_hip()):
     BASE_QUANTIZATION_METHODS.update(
         {
             "mxfp4": Mxfp4Config,
@@ -139,6 +179,9 @@ CPU_QUANTIZATION_METHODS = {
     "gptq": CPUGPTQConfig,
     "mxfp4": Mxfp4Config,
 }
+
+if _legacy_cuda:
+    CPU_QUANTIZATION_METHODS = {}
 
 QUANTIZATION_METHODS = {**BASE_QUANTIZATION_METHODS}
 
