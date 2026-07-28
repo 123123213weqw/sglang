@@ -86,12 +86,36 @@ if _is_cuda or _is_xpu or _is_musa:
     else:
         _flashinfer_layernorm_available = False
 
-    from sgl_kernel import (
-        fused_add_rmsnorm,
-        gemma_fused_add_rmsnorm,
-        gemma_rmsnorm,
-        rmsnorm,
-    )
+    try:
+        from sgl_kernel import (
+            fused_add_rmsnorm,
+            gemma_fused_add_rmsnorm,
+            gemma_rmsnorm,
+            rmsnorm,
+        )
+    except ImportError:
+
+        def _torch_rmsnorm(x, weight, eps, weight_offset=0.0):
+            normalized = x.float() * torch.rsqrt(
+                x.float().pow(2).mean(dim=-1, keepdim=True) + eps
+            )
+            return (normalized * (weight.float() + weight_offset)).to(x.dtype)
+
+        def rmsnorm(x, weight, eps):
+            return _torch_rmsnorm(x, weight, eps)
+
+        def fused_add_rmsnorm(x, residual, weight, eps):
+            residual.add_(x)
+            x.copy_(_torch_rmsnorm(residual, weight, eps))
+
+        def gemma_rmsnorm(x, weight, eps):
+            return _torch_rmsnorm(x, weight, eps, weight_offset=1.0)
+
+        def gemma_fused_add_rmsnorm(x, residual, weight, eps):
+            residual.add_(x)
+            x.copy_(_torch_rmsnorm(residual, weight, eps, weight_offset=1.0))
+
+
 _has_aiter_layer_norm = False
 _has_vllm_rms_norm = False
 _has_rocm_triton_gemma_rms_norm = False

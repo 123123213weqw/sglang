@@ -98,7 +98,6 @@ from sglang.srt.model_executor.runner_utils.buffers import (
     PrefillInputBuffers,
 )
 from sglang.srt.runtime_context import get_parallel
-from sglang.srt.speculative.eagle_utils import get_draft_input_from_target_hidden_dim
 from sglang.srt.utils import (
     get_available_gpu_memory,
     is_npu,
@@ -360,6 +359,10 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             and model_runner.is_draft_worker
             and model_runner.spec_algorithm.is_eagle()
         ):
+            from sglang.srt.speculative.eagle_utils import (
+                get_draft_input_from_target_hidden_dim,
+            )
+
             hidden_dim = get_draft_input_from_target_hidden_dim(model_runner)
             with torch.device(self.device):
                 self.static_draft_hidden_states = torch.zeros(

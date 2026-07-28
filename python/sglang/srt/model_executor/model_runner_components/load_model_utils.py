@@ -49,7 +49,8 @@ class LoadedModel(msgspec.Struct, frozen=True, kw_only=True):
 def maybe_downgrade_dtype_for_legacy_gpu(
     *, server_args: ServerArgs, model_config: ModelConfig
 ) -> None:
-    if torch.cuda.get_device_capability()[0] < 8:
+    compute_capability = torch.cuda.get_device_capability()
+    if compute_capability[0] < 8:
         logger.info(
             "Compute capability below sm80. Use float16 due to lack of bfloat16 support."
         )
@@ -59,8 +60,19 @@ def maybe_downgrade_dtype_for_legacy_gpu(
             "ModelRunner._sm80_dtype_fallback", {"dtype": "float16"}
         )
         model_config.dtype = torch.float16
-        if torch.cuda.get_device_capability()[1] < 5:
-            raise RuntimeError("SGLang only supports sm75 and above.")
+        if compute_capability < (7, 5):
+            architectures = getattr(model_config.hf_config, "architectures", []) or []
+            rwkv7_architectures = {
+                "RWKV7ForCausalLM",
+                "Rwkv7ForCausalLM",
+                "NativeRWKV7ForCausalLM",
+            }
+            if not rwkv7_architectures.intersection(architectures):
+                raise RuntimeError("SGLang only supports sm75 and above.")
+            logger.info(
+                "Enabling the RWKV-7 legacy CUDA path on compute capability %s.",
+                compute_capability,
+            )
 
 
 def maybe_trigger_remote_instance_nccl_send_group(

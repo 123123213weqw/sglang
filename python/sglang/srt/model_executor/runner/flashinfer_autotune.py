@@ -49,6 +49,8 @@ def should_run_flashinfer_autotune(
         return False
     if mr.server_args.disable_flashinfer_autotune:
         return False
+    if torch.cuda.get_device_capability()[0] < 9:
+        return False
 
     # CuteDSL v1 (cutedsl runner + deepep a2a) bypasses MoeRunner and must not
     # be autotuned -- its _dummy_run would dispatch more tokens per rank than
@@ -102,9 +104,6 @@ def should_run_flashinfer_autotune(
     )
 
     if not (moe_needs_autotune or fp4_gemm_needs_autotune or fp8_gemm_needs_autotune):
-        return False
-
-    if torch.cuda.get_device_capability()[0] < 9:
         return False
 
     if mr.spec_algorithm.is_speculative():
@@ -185,11 +184,15 @@ def flashinfer_autotune_context(model_runner: ModelRunner, *, skip_logits: bool)
 
             maybe_skip_logits = autotune_dummy_run_mode()
         skip_ops = get_flashinfer_autotune_skip_ops(mr)
-        with torch.inference_mode(), autotune(
-            True,
-            cache=str(autotune_cache),
-            skip_ops=skip_ops,
-        ), maybe_skip_logits:
+        with (
+            torch.inference_mode(),
+            autotune(
+                True,
+                cache=str(autotune_cache),
+                skip_ops=skip_ops,
+            ),
+            maybe_skip_logits,
+        ):
             yield
     torch.cuda.current_stream().wait_stream(mr.forward_stream)
     logger.info("FlashInfer autotune completed.")

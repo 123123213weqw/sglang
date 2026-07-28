@@ -29,15 +29,28 @@ _is_npu = is_npu()
 _is_xpu = is_xpu()
 _is_mps = is_mps()
 if _is_cuda or _is_hip:
-    from sgl_kernel.kvcacheio import (
-        transfer_kv_all_layer_direct_lf_pf,
-        transfer_kv_all_layer_mla,
-        transfer_kv_all_layer_mla_lf_pf,
-        transfer_kv_direct,
-        transfer_kv_per_layer_direct_pf_lf,
-        transfer_kv_per_layer_mla,
-        transfer_kv_per_layer_mla_pf_lf,
-    )
+    try:
+        from sgl_kernel.kvcacheio import (
+            transfer_kv_all_layer_direct_lf_pf,
+            transfer_kv_all_layer_mla,
+            transfer_kv_all_layer_mla_lf_pf,
+            transfer_kv_direct,
+            transfer_kv_per_layer_direct_pf_lf,
+            transfer_kv_per_layer_mla,
+            transfer_kv_per_layer_mla_pf_lf,
+        )
+    except ImportError:
+
+        def _missing_kvcacheio(*args, **kwargs):
+            raise RuntimeError("HiCache requires sgl_kernel.kvcacheio")
+
+        transfer_kv_all_layer_direct_lf_pf = _missing_kvcacheio
+        transfer_kv_all_layer_mla = _missing_kvcacheio
+        transfer_kv_all_layer_mla_lf_pf = _missing_kvcacheio
+        transfer_kv_direct = _missing_kvcacheio
+        transfer_kv_per_layer_direct_pf_lf = _missing_kvcacheio
+        transfer_kv_per_layer_mla = _missing_kvcacheio
+        transfer_kv_per_layer_mla_pf_lf = _missing_kvcacheio
 if _is_cuda:
     from sglang.kernels.ops.mamba.transfer_mamba import (
         transfer_kv_mamba_lf_pf,
@@ -64,7 +77,6 @@ from sglang.srt.mem_cache.pool_host.hisparse import HiSparseHostPoolMixin
 
 
 class MambaPoolHost(HostKVCache):
-
     def __init__(
         self,
         device_pool: MambaPool,
