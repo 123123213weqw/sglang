@@ -294,7 +294,10 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         if x.ndim > 2:
             x = x.reshape(-1, x.size(-1))
             reshape_after_matmul = True
-        bf_x = x.to(torch.bfloat16)
+        # bitsandbytes MatMul8bitLt quantizes activations in fp16. Passing
+        # bf16 only causes an internal cast (and one warning per projection),
+        # so cast once at the SGLang boundary instead.
+        int8_x = x.to(torch.float16)
 
         qweight = layer.weight
         offsets = qweight.bnb_shard_offsets
@@ -329,7 +332,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
                 ):
                     matmul_states[i].use_pool = True
 
-            new_x = bf_x.unsqueeze(0)
+            new_x = int8_x.unsqueeze(0)
 
             out[:, current_index : current_index + output_size] = matmul(
                 new_x, qweight[offsets[i] : offsets[i + 1]], state=matmul_states[i]

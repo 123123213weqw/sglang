@@ -2653,7 +2653,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         return (
             self._unquantized_generator(
-                hf_weights_files, use_safetensors, quant_state_dict
+                hf_weights_files,
+                use_safetensors,
+                quant_state_dict,
+                load_8bit=load_8bit,
             ),
             quant_state_dict,
         )
@@ -2743,9 +2746,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 yield weight_name, weight_tensor
 
     def _unquantized_generator(
-        self, hf_weights_files, use_safetensors, quant_state_dict
+        self,
+        hf_weights_files,
+        use_safetensors,
+        quant_state_dict,
+        load_8bit: bool = False,
     ) -> Generator:
         from bitsandbytes.functional import quantize_4bit
+        from bitsandbytes.nn import Int8Params
 
         tp_size = get_parallel().tp_size
         tp_rank = get_parallel().tp_rank
@@ -2757,8 +2765,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if any(
                 target_module in weight_name for target_module in self.target_modules
             ) and weight_name.endswith(".weight"):
-                weight_name = weight_name.replace(".weight", ".qweight")
-
                 if any(
                     module in weight_name
                     for module in self.column_parallel_weights_modules
@@ -2775,23 +2781,39 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     end_index = total_size // tp_size * (tp_rank + 1)
                     weight_sub_tensor = weight_tensor[start_index:end_index, ...]
 
-                # bitsandbytes requires data in GPU
-                if weight_sub_tensor.is_cuda:
-                    loaded_weight = weight_sub_tensor
+                if load_8bit:
+                    # Int8Params performs quantization while transferring a CPU
+                    # tensor to CUDA. Wrapping an already-CUDA tensor leaves it
+                    # in floating point, so preserve this conversion order.
+                    if weight_sub_tensor.is_cuda:
+                        weight_sub_tensor = weight_sub_tensor.cpu()
+                    int8_param = Int8Params(
+                        weight_sub_tensor.contiguous(),
+                        has_fp16_weights=False,
+                        requires_grad=False,
+                    ).cuda()
+                    processed_weight = int8_param.data
+                    quant_state_dict[weight_name] = int8_param.SCB
                 else:
-                    loaded_weight = weight_sub_tensor.cuda()
+                    # bitsandbytes requires data in GPU
+                    if weight_sub_tensor.is_cuda:
+                        loaded_weight = weight_sub_tensor
+                    else:
+                        loaded_weight = weight_sub_tensor.cuda()
 
-                # remove the following after the issue is fixed:
-                # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1342
-                if loaded_weight.is_contiguous() is False:
-                    loaded_weight = loaded_weight.contiguous()
+                    # remove the following after the issue is fixed:
+                    # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1342
+                    if loaded_weight.is_contiguous() is False:
+                        loaded_weight = loaded_weight.contiguous()
 
-                with set_default_torch_dtype(torch.float32):
-                    processed_weight, quant_state = quantize_4bit(
-                        loaded_weight, compress_statistics=True, quant_type="nf4"
-                    )
+                    with set_default_torch_dtype(torch.float32):
+                        processed_weight, quant_state = quantize_4bit(
+                            loaded_weight,
+                            compress_statistics=True,
+                            quant_type="nf4",
+                        )
 
-                quant_state_dict[weight_name] = quant_state
+                    quant_state_dict[weight_name] = quant_state
             else:
                 processed_weight = weight_tensor
 
@@ -2851,6 +2873,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         load_8bit = False
         if pre_quant:
             load_8bit = quant_config.get("load_in_8bit", False)
+        elif self.load_config.model_loader_extra_config:
+            load_8bit = self.load_config.model_loader_extra_config.get(
+                "load_in_8bit", False
+            )
 
         qweight_iterator, quant_state_dict = self._get_quantized_weights_iterator(
             model_config.model_path, model_config.revision, pre_quant, load_8bit

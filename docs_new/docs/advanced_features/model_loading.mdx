@@ -147,9 +147,9 @@ python -m sglang.launch_server \
     </tr>
     <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>bitsandbytes</code></td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}><code>qlora_adapter_name_or_path</code> (str)</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>QLoRA adapter to apply on top of the bitsandbytes-quantized base weights.</td>
-      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>—</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}><code>load_in_8bit</code>, <code>load_in_4bit</code>, <code>llm_int8_threshold</code>, <code>qlora_adapter_name_or_path</code></td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>Select online BitsAndBytes W4/W8 settings, or apply a QLoRA adapter on top of the quantized base weights.</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.05)"}}>W4; W8 uses threshold 0 unless explicitly overridden</td>
     </tr>
     <tr>
       <td style={{padding: "9px 12px", fontWeight: 500, backgroundColor: "rgba(255,255,255,0.02)"}}><code>runai_streamer</code></td>

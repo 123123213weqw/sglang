@@ -290,7 +290,19 @@ def get_quant_config(
             not load_config.model_loader_extra_config
             or "qlora_adapter_name_or_path" not in load_config.model_loader_extra_config
         ):
-            return quant_cls.from_config({"adapter_name_or_path": ""})
+            # Online quantization has no checkpoint-side quantization_config.
+            # Accept BitsAndBytesConfig fields here so callers can select W8
+            # as well as the default W4 mode.
+            online_config = dict(load_config.model_loader_extra_config or {})
+            if online_config.get("load_in_8bit") and (
+                "llm_int8_threshold" not in online_config
+            ):
+                # The outlier path performs a data-dependent host check and is
+                # not CUDA-graph capturable. Online serving defaults to the
+                # capture-compatible pure W8 path; callers can explicitly set
+                # a positive threshold when eager decode is preferred.
+                online_config["llm_int8_threshold"] = 0.0
+            return quant_cls.from_config(online_config)
         model_name_or_path = load_config.model_loader_extra_config[
             "qlora_adapter_name_or_path"
         ]

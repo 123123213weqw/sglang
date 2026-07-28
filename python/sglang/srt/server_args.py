@@ -535,7 +535,9 @@ class ServerArgs:
         "corresponding to the chosen load_format. For load_format=presharded, "
         "JSON may include presharded_path (target cache root), "
         "draft_presharded_path (draft cache root), max_file_bytes, "
-        "hash_num_threads, and verify_on_load.",
+        "hash_num_threads, and verify_on_load. For load_format=bitsandbytes, "
+        "BitsAndBytesConfig fields such as load_in_8bit, load_in_4bit, and "
+        "llm_int8_threshold select the online weight format.",
         NS("model"),
     ] = "{}"
     trust_remote_code: A[
